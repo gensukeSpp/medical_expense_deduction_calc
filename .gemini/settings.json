@@ -1,0 +1,46 @@
+{
+  "mcp": {
+    "allowed": [
+      "serena",
+      "playwright",
+      "linksee"
+    ]
+  },
+  "mcpServers": {
+    "serena": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/oraios/serena",
+        "serena",
+        "start-mcp-server",
+        "--context",
+        "ide-assistant",
+        "--project",
+        "/home/nabu_dvl/workspace/OCR_app/medical_exp_deduction_calc"
+      ]
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ]
+    },
+    "linksee": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "linksee-memory"
+      ]
+    }
+  },
+  "experimental": {
+    "gemmaModelRouter": {
+      "enabled": true,
+      "classifier": {
+        "host": "http://localhost:9379",
+        "model": "gemma3-1b-gpu-custom"
+      }
+    }
+  }
+}
