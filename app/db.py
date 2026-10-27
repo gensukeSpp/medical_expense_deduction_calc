@@ -143,6 +143,29 @@ def get_clinic_by_name(db_path: str | Path, name: str) -> Optional[Dict[str, Any
         conn.close()
 
 
+def get_clinic_by_id(db_path: str | Path, clinic_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a clinic by its ID.
+
+    Args:
+        db_path: Path to the SQLite database.
+        clinic_id: The clinic ID.
+
+    Returns:
+        Optional[Dict[str, Any]]: The clinic dict with keys id, name, created_at,
+                                  or None if no such clinic exists.
+    """
+    conn = get_db_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "SELECT id, name, created_at FROM clinics WHERE id = ?",
+            (clinic_id,),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 """
 get_clinic_by_name の接続リークを修正すると同時に、マルチプロセス環境での競合状態（レースコンディション）を安全に回避するための get_or_create_clinic ヘルパー関数を追加します。\n
 これにより、同じクリニック名が同時に処理された場合でも、一意のクリニックIDを安全に取得・作成できるようになります。
