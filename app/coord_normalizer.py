@@ -258,3 +258,34 @@ def _is_multi_box(value: Any) -> bool:
     if not isinstance(value[0], list) or not value[0]:
         return False
     return isinstance(value[0][0], list)
+
+
+def _is_numeric_point(p: Any) -> bool:
+    """Return True if ``p`` is a 2+ element list/tuple with numeric lead coords."""
+    if not isinstance(p, (list, tuple)) or len(p) < 2:
+        return False
+    return all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in p[:2])
+
+
+def shift_template_to_date_basis(coords: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Shift template coords so the template's own date box becomes the origin.
+
+    Shared by apply_date_anchor_normalization (auto migration, Issue #39) and
+    the Web admin manual toggle (Issue #42). Returns None when the date box is
+    unlearned or malformed.
+
+    Args:
+        coords: Template coords_corrections dict.
+
+    Returns:
+        A new dict shifted by the date box's (min-x, min-y), or None.
+    """
+    date_box = coords.get("date")
+    if not isinstance(date_box, (list, tuple)) or not date_box:
+        return None
+    valid_points = [p for p in date_box if _is_numeric_point(p)]
+    if not valid_points:
+        return None
+    offset_x = min(p[0] for p in valid_points)
+    offset_y = min(p[1] for p in valid_points)
+    return shift_template_coords(coords, offset_x, offset_y)
