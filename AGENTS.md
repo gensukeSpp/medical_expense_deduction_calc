@@ -366,8 +366,11 @@ gives you structural context (callers, dependents, test coverage) that file sear
 <!-- better-code-review-graph MCP tools -->
 ## MCP Tools: better-code-review-graph
 
-**This is the successor MCP server for the same knowledge graph.** The graph DB
-(`.code-review-graph/graph.db`) is shared by both servers, but the recent,
+**This is the successor MCP server for the same knowledge graph.** ただし実 DB は
+旧 `code-review-graph` と**共有ではなく別々** (実測 2026-10-26: better-CRG の CLI
+`graph build` / `graph stats` が読み書きするのは `<repo>/.crg/graph.db` で、
+旧ツールの `.code-review-graph/graph.db` は別物、`.better-code-review-graph/graph.db`
+は better-CRG が参照しない残骸)。
 集約 API (`config` / `graph` / `query` / `review` / `security`) を後継とする。
 新規の操作では **better 版を優先**し、旧 `*_tool` 名はレガシーとして扱う。
 ※ セキュリティスキャンは `security` ツールで実施可能 (OWASP 系 sink 検出。
@@ -407,6 +410,39 @@ gives you structural context (callers, dependents, test coverage) that file sear
 3. テスト網羅は `query(pattern="tests_for", target=<func>)` で確認する。
 4. 純粋リファクタ (ロジック不変) の監査は `review(action="delta", show_line_shifts=true)`
    を利用する。
+
+### 出力サイズの抑え方（review / query の呼び出し規約）
+
+実測（2026-10-22~~, PR #45 レビュー時~~）: `review(action="context", base="origin/main")` の既定呼び出しは **約 1.4MB** を返し、読み切れない。原因は `graph.edges`（約 112KB）と、変更ファイル全体の推移的な影響ノード。以下を既定にする。
+
+- **変更ファイルを明示する**: `changed_files` に対象パスを列挙して渡す（自動検出に任せない）。明示指定 + `max_depth=1` + `include_source=false` で約 72KB まで下がった。
+- **深さは 1 から始める**: `max_depth` の既定値 2 は影響ファイルを一気に広げる。必要な場合だけ 2 にする。
+- **ソース断片は必要な関数だけ読む**: `include_source=true` は `max_lines_per_file` を小さく（例 50）し、詳細は `read_file` で該当行を読む。
+- **大きな結果は再取得しない**: 出力は `~/.hermes/.../cache/spillover/*.txt` に保存される。`read_file` の offset/limit でページングするか、`execute_code` で JSON を分解して必要な項目だけ抽出する。同じ呼び出しを繰り返さない。
+- **ツール呼び出しはファイル単位で分ける**: 変更が多い PR は `changed_files` をディレクトリ単位（例: `src/components/organisms/` → `src/lib/`）に分割して呼ぶ。
+
+### グラフの鮮度
+
+- グラフは手動ビルド。ソース変更後は `graph(action="update", base="origin/main")` で差分更新する。初期化やスキーマ変更時のみ `graph(action="build", full_rebuild=true)`。
+- `graph(action="stats")` の `Last updated` が作業時点より古い場合は更新してから使う。
+- レビュー対象が未コミットの作業ツリーなら、base を指定して差分を明示する。
+- **better-CRG の実 DB は `<repo>/.crg/graph.db`**（自前の `.gitignore` が `*` を無視するため git 追跡対象外。`graph.build`/`graph stats` が読み書きするのはこのファイルで、`.code-review-graph/` や `.better-code-review-graph/` は参照しない）。CLI での更新・確認:
+  ```bash
+  # 差分更新（ソース変更後に実行。no git hooks のため手動）
+  uvx --python 3.13 better-code-review-graph graph build --repo-root .
+  # 全再構築（初回・大規模リファクタ・不整合時のみ）
+  uvx --python 3.13 better-code-review-graph graph build --full-rebuild --repo-root .
+  # 鮮度確認（Last updated を確認）
+  uvx --python 3.13 better-code-review-graph graph stats --repo-root .
+  ```
+  stats の `Last updated` が作業時点より古い場合、または DB mtime と整合しない場合は更新してから使う。
+
+### 役割の使い分け（レビュー時の順序）
+
+1. 変更範囲の把握: `review(action="context")`（明示 `changed_files` + 小さい深さ）
+2. 逆依存の確定: `search_files` で import を grep（TSX は graph が弱い）
+3. 単一シンボルの定義・参照: Serena（`find_referencing_symbols`）
+4. 結論はソース（`git diff origin/main...HEAD -- <path>` と該当ファイルの読解）で検証する
 
 ### Serena との使い分け
 
