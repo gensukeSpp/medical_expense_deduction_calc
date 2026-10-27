@@ -192,7 +192,7 @@ def apply_date_anchor_normalization(
         return None  # date 未学習 → 従来方式
 
     from app.input import read_json
-    from app.coord_normalizer import normalize_coordinates_by_anchor, shift_template_coords
+    from app.coord_normalizer import normalize_coordinates_by_anchor
 
     ocr_entries = _to_ocr_entries(read_json(raw_path))
     if not ocr_entries:
@@ -218,27 +218,17 @@ def apply_date_anchor_normalization(
     # 一度だけ topmost → date 基準へ移行（既に date なら no-op）
     if template_basis == "topmost":
         from app.db import update_template_basis as _utb
+        from app.coord_normalizer import shift_template_to_date_basis
 
         # template は topmost 基準で学習されているため、date 基準へ変換するには
-        # template 自身の date box 位置（topmost 座標系）でシフトする。
-        # anchor の offset（raw の date 位置）でシフトすると、template の date box が
-        # 原点 (0,0) に揃わず、以降の近傍検索・座標マッチングが継続してずれる（Issue #39-4）。
-        template_date_box = coords.get("date")
-        if template_date_box is None:
+        # template 自身の date box 位置（topmost 座標系）でシフトする（Issue #39-4）。
+        new_coords = shift_template_to_date_basis(coords)
+        if new_coords is None:
             return None  # date 未学習 → 従来方式
-        valid_points = [p for p in template_date_box if isinstance(p, (list, tuple)) and len(p) >= 2]
-        if not valid_points:
-            return None
-        template_offset_x = min(p[0] for p in valid_points)
-        template_offset_y = min(p[1] for p in valid_points)
-
-        new_coords = shift_template_coords(coords, template_offset_x, template_offset_y)
         _utb(db_path, clinic_id, new_coords, changed_fields=list(coords.keys()))
         logger.info(
-            "Migrated template for clinic %s to date basis (template_offset=(%d, %d), raw_offset=(%d, %d))",
+            "Migrated template for clinic %s to date basis (raw_offset=(%d, %d))",
             clinic_id,
-            template_offset_x,
-            template_offset_y,
             offset_x,
             offset_y,
         )
