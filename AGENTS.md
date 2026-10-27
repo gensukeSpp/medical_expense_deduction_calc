@@ -46,6 +46,7 @@ Phase 1（読み込み、抽出、修正、キャッシュ）のみを実装。�
 │   │   ├── receipt_normalizer.py         # receipt データ正規化
 │   │   ├── ocr_coordinate_service.py     # 座標検索・フィードバック
 │   │   ├── receipt_updater.py            # receipt 更新オーケストレーター
+│   │   ├── template_admin_service.py     # テンプレート管理・coord_basis 手動切替 [Issue #42]
 │   │
 │   └── web/                   # Web UI (FastAPI + Jinja2)
 │       ├── server.py          # FastAPI アプリ作成
@@ -273,6 +274,13 @@ clinic のテンプレートに `date` 座標が学習済みで、同一 clinic/
 （`coord_basis=='date'`）では、座標ベースのフィールド上書き（`search_fields_by_proximity` による引き直し）
 を**スキップ**して誤上書きを防ぐ。clinic 名の正しい名への上書きと新規 clinic 作成は
 coord_basis に関係なく従来どおり実行する。未移行（`'topmost'` または旧データ）は従来動作。
+
+**coord_basis の手動切替（Issue #42）**: 自動遷移が実データで効かない場合（`resolve_date_anchor()` が
+同日付候補 2 件の曖昧で None）、Web 管理画面（`GET /admin/templates` /
+`POST /admin/templates/{clinic_id}/basis`）から `coord_basis` を topmost → date へ**手動で一方向切替**できる。
+シフト計算は自動遷移と共通の `coord_normalizer.shift_template_to_date_basis()` を使い、date box **学習済み**
+template のみ切替許可（未学習は 409）。移行は `db.update_template_basis()`（`history_reason='manual_basis_toggle'`）を再利用し、
+既に date なら no-op（冪等）。詳細は後述 rules を参照。
 
 座標正規化・date anchor の判定条件・閾値・DB 移行・前方補正の coord_basis ガード詳細は変更頻度が高いため、
 `.hermes/rules/coordinate-normalization.md` に分離している。詳しくは以下を参照:

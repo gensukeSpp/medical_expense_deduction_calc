@@ -58,6 +58,43 @@ normalize_coordinates()          … topmost/leftmost 基準（従来・常に�
 `db_migrations` が `PRAGMA table_info(templates)` で `coord_basis` の有無を確認し、
 無ければ `ALTER TABLE templates ADD COLUMN coord_basis TEXT NOT NULL DEFAULT 'topmost'` を実行（idempotent）。
 
+## 手動切替（Web admin, Issue #42）
+
+自動遷移が実データで効かない場合（`resolve_date_anchor()` が同日付候補 2 件の曖昧で None → 遷移しない）の
+**検証手段**として、Web 管理画面から `coord_basis` を topmost → date へ**手動で一方向切替**できる。
+
+- 画面: `GET /admin/templates`（clinic と最新 template 一覧。coord_basis / date box 学習有無を表示）
+- 切替: `POST /admin/templates/{clinic_id}/basis`（body `{"basis":"date"}`）
+- ロジック: `app/services/template_admin_service.py::TemplateAdminService`（server.py は薄いルーティングのみ）
+
+### シフト計算の共通化（Q2 案A）
+
+`app/coord_normalizer.shift_template_to_date_basis(coords) -> Optional[dict]` が、**template 自身の date box の
+min-x / min-y を原点**に全 box をシフトする。**自動遷移（`date_anchor.apply_date_anchor_normalization`）と
+手動切替（admin）の両方**がこの関数を呼ぶため、両方式で coords が一致する（検証用途で重要な保証）。
+
+- date box 未学習 / 不正（2D 座標でない）→ `None`（→ 呼び出し側で 409）。
+- 不正座標への防御: 点が数値（int/float、bool 除く）であることを検証（`_is_numeric_point`）。
+
+### ガード（HTTP マトリクス）
+
+| 条件 | HTTP | レスポンス |
+|------|------|-----------|
+| `db_path` 未設定 | 503 | "DB が設定されていません"（管理は DB 必須） |
+| `basis != 'date'` | 400 | InvalidBasisError |
+| clinic_id 不明 | 404 | `get_clinic_by_id()`（db.py・repository に今回追加） |
+| clinic 存在・template 未学習 | 409 | "テンプレート未学習のため切替できません" |
+| 既に `coord_basis=='date'` | 200 | `{"status":"noop","reason":"already_date"}`（冪等・history 追記なし） |
+| date box 未学習 / coords 不正 | 409 | "date box 未学習のため切替できません"（**必須ガード** — 未学習を強制 date 化すると前方補正が崩れる: Issue #40） |
+| 移行成功 | 200 | `{"status":"updated","coord_basis":"date"}`（`change_reason='manual_basis_toggle'` で history 1 件） |
+| 競合（他経路で移行済み） | 200 | `update_template_basis()` が False → no-op として扱う |
+
+- 移行処理は既存 `db.update_template_basis()` を再利用（history 保存 + coords 差し替え + `coord_basis='date'` を 1 トランザクション。
+  既に date なら False＝二重変換ガード内蔵）。**新規 SQL を書かない**。
+- 移行は **template のみ**変更。既存 receipt / `receipts.ocr_json` の再正規化は行わない（切替後に画像を再投入して
+  date 基準の補正を確認する運用）。
+- date → topmost の逆方向切替は対象外（一方向のみ）。曖昧性判定の緩和も後続 Issue。
+
 ## 設計判断（重要な制約）
 
 - **anchor 後は構造化 parse を再実行しない。** `process_input_json` は呼び出しごとに新しい receipt 行を
