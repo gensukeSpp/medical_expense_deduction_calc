@@ -291,7 +291,12 @@ class TestProcess:
         ):
             service.process(image_path, output_dir, model="mock", db_path="/tmp/db.sqlite3")
 
-        mock_anchor.assert_called_once_with(raw_path, {"clinic": "A", "date": "2026-01-15"}, "/tmp/db.sqlite3")
+        mock_anchor.assert_called_once_with(
+            raw_path,
+            {"clinic": "A", "date": "2026-01-15"},
+            "/tmp/db.sqlite3",
+            output_dir=output_dir,
+        )
 
     def test_happy_path_anchor_skipped_when_low_confidence(
         self, service: ImageProcessingService, image_path: Path, output_dir: Path

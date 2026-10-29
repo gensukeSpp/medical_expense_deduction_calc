@@ -219,7 +219,9 @@ class ReceiptProcessor:
                     try:
                         from app.date_anchor import apply_date_anchor_normalization
 
-                        apply_date_anchor_normalization(active_raw_path, structured, self.db_path)
+                        apply_date_anchor_normalization(
+                            active_raw_path, structured, self.db_path, output_dir=output_dir
+                        )
                     except Exception:
                         LOG.exception("Date-anchor normalization failed for %s", active_raw_path)
 

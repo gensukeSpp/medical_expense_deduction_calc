@@ -29,8 +29,12 @@ normalize_coordinates()          … topmost/leftmost 基準（従来・常に�
    - 候補 0 件 → 従来方式。
 3. **template に date coords が未学習 → 従来方式**（受入条件1）。
 4. 候補が 1 件 → 採用（template basis が date でも可）。
-5. 候補が複数 → template が `topmost` 基準のときのみ、中心距離が
-   `proximity_threshold`（50px）以内で**一意に**近い box を採用。競合・曖昧は従来方式。
+5. 候補が複数 → template の基準に応じて判定:
+   - `topmost` 基準: 中心距離が `proximity_threshold`（50px）以内で**一意に**近い box を採用。
+   - `date` 基準（手動切替後, [中-1]）: template の date box は原点のため近接が無意味。代わりに
+     `template_coords` の date 以外フィールドを「フィールド中心 + 候補 top-left」で実 raw へ投影し、
+     (50px 外フィールド数, 距離合計) の辞書順最小を採用。同一スコアは競合 → 従来方式。
+     詳細は後述「手動切替後の date 基準補正」参照。
 
 ## 使用する閾値
 
@@ -95,6 +99,23 @@ min-x / min-y を原点**に全 box をシフトする。**自動遷移（`date_
   date 基準の補正を確認する運用）。
 - date → topmost の逆方向切替は対象外（一方向のみ）。曖昧性判定の緩和も後続 Issue。
 
+### 手動切替後の date 基準補正を実際に走らせる（[中-1] 対応）
+
+手動切替は template を date 基準化するだけで、従来は生の raw 側（topmost のまま）と基底不一致となり、
+この clinic では date 基準の前方補正・座標抽出が一切走らなかった（PR #45 の「topmost では抽出できなかった
+データを抽出できた」という主張は**誤り**）。これを直すため `apply_date_anchor_normalization()` は:
+
+1. `resolve_date_anchor()` に `template_coords` を渡し、**date 基準 template でも候補 2 件を解決**できるようにした
+   （レイアウト整合スコアリング。既存 50px 閾値を流用、同一スコアは従来どおり None）。
+2. `output_dir` を渡すと、date 基準へ再正規化した raw に対し `search_fields_by_proximity` で**座標ベースの
+   フィールド抽出**を適用し、`structured`（と `*-structured_data.json`）へ反映する。レシートは**二重登録しない**
+   （`insert_receipt` は呼ばない）。
+3. 前方補正（`_apply_template_corrections`）の時点での #40 ガード（date template は座標上書きスキップ）は**据え置き**。
+   上記は「再正規化後」にのみ座標抽出を適用するため、topmost raw × date template の基底不一致は変わらず防止する。
+
+- 呼び出しは両オーケストレータから `output_dir=output_dir` を渡す（`image_processing_service.py` / `receipt_processor.py`）。
+- `output_dir` を渡さない従来呼び出し（`--input-json` 経路・テストの DB 同期確認）は **structured を変更しない**（後方互換）。
+
 ## 設計判断（重要な制約）
 
 - **anchor 後は構造化 parse を再実行しない。** `process_input_json` は呼び出しごとに新しい receipt 行を
@@ -132,7 +153,7 @@ min-x / min-y を原点**に全 box をシフトする。**自動遷移（`date_
 |--------|------|------|
 | `raw_data.json` | date 基準（anchor 確定時） | `normalize_coordinates_by_anchor` で上書き |
 | `receipts.ocr_json`（DB） | date 基準 | `update_receipt_ocr_json_by_source` で更新 |
-| `structured_data.json` | 座標基準に非依存（テキスト抽出値） | 再解析なし |
+| `structured_data.json` | date 基準補正適用時は座標抽出値を反映可 | `output_dir` 指定時のみ上書き |
 | `templates.coords_corrections` | date 基準（切替済み） | `coord_basis` で識別 |
 | OCR 未学習 clinic / `--input-json` | topmost 基準（従来） | anchor 解決しない |
 

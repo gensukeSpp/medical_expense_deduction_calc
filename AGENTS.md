@@ -280,7 +280,15 @@ coord_basis に関係なく従来どおり実行する。未移行（`'topmost'`
 `POST /admin/templates/{clinic_id}/basis`）から `coord_basis` を topmost → date へ**手動で一方向切替**できる。
 シフト計算は自動遷移と共通の `coord_normalizer.shift_template_to_date_basis()` を使い、date box **学習済み**
 template のみ切替許可（未学習は 409）。移行は `db.update_template_basis()`（`history_reason='manual_basis_toggle'`）を再利用し、
-既に date なら no-op（冪等）。詳細は後述 rules を参照。
+既に date なら no-op（冪等）。
+
+**[中-1] 対応（date 基準補正を実際に走らせる）**: 手動切替で template を date 化しても raw は topmost のまま
+だったため、対象 clinic（同日付候補 2 件）では date 基準の座標抽出が走らず「topmost では抽出できないデータを
+抽出できた」という PR #45 の主張は誤りだった。修正後は `apply_date_anchor_normalization()` が:
+- `resolve_date_anchor()` に `template_coords` を渡し、date 基準 template でも候補 2 件をレイアウト整合で解決する。
+- 呼び出し側が `output_dir` を渡すと、date 基準へ再正規化した raw に対し座標ベース抽出を適用し
+  `*-structured_data.json` へ反映する（レシートは二重登録しない）。
+詳細は後述 rules を参照。
 
 座標正規化・date anchor の判定条件・閾値・DB 移行・前方補正の coord_basis ガード詳細は変更頻度が高いため、
 `.hermes/rules/coordinate-normalization.md` に分離している。詳しくは以下を参照:
