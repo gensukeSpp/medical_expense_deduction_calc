@@ -1,8 +1,7 @@
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
-from typing import Optional
 
 from app.services.receipt_service import ReceiptService
 from app.services.template_admin_service import (
@@ -68,7 +67,7 @@ def create_app(output_dir: str = "output_json", db_path: str | None = None) -> F
         else:
             basis = (await request.form()).get("basis")
         try:
-            result = service.toggle_basis(clinic_id, str(basis) if basis is not None else "")
+            service.toggle_basis(clinic_id, str(basis) if basis is not None else "")
         except ClinicNotFoundError:
             raise HTTPException(status_code=404, detail="clinic not found")
         except TemplateBasisConflictError as e:
@@ -77,7 +76,7 @@ def create_app(output_dir: str = "output_json", db_path: str | None = None) -> F
             raise HTTPException(status_code=400, detail=str(e))
         except RuntimeError as e:
             raise HTTPException(status_code=503, detail=str(e))
-        return result
+        return RedirectResponse(url="/admin/templates", status_code=303)
 
     @app.get("/", response_class=HTMLResponse)
     async def read_root(request: Request, service: ReceiptService = Depends(get_receipt_service)):
