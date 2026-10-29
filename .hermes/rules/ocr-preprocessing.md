@@ -2,6 +2,7 @@
 
 > AGENTS.md から切り出した doc。Issue #36 (抽出前の出力向上のための前処理) で追加。
 > 前処理の挙動・パラメータ・生成ファイルが変わるたびに更新する。
+> 設計判断の概観は [design-decisions.md](./design-decisions.md) を参照。
 
 ## 概要
 

@@ -2,6 +2,7 @@
 
 > AGENTS.md から切り出した doc。Issue #39 (日付基準による OCR box 座標正規化) で追加。
 > 座標正規化の基準・日付 anchor の判定条件・DB coord_basis・閾値が変わるたびに更新する。
+> 設計判断の概観は [design-decisions.md](./design-decisions.md) を参照。
 
 ## 概要
 
