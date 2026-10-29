@@ -10,6 +10,7 @@ from app.coord_normalizer import (
     _subtract_offset,
     normalize_coordinates_by_anchor,
     shift_template_coords,
+    shift_template_to_date_basis,
 )
 
 
@@ -295,3 +296,26 @@ class TestShiftTemplateCoords:
     def test_none_value_preserved(self):
         coords = {"date": None}
         assert shift_template_coords(coords, 50, 100) == {"date": None}
+
+
+class TestShiftTemplateToDateBasis:
+    """Tests for shift_template_to_date_basis helper (Issue #42)."""
+
+    def test_shifts_by_date_box_min_point(self):
+        coords = {
+            "date": [[43, 234], [400, 238], [400, 269], [43, 265]],
+            "amount": [[443, 300], [523, 300], [523, 340], [443, 340]],
+        }
+        result = shift_template_to_date_basis(coords)
+        assert result is not None
+        # date box の min-x/min-y = (43, 234) が原点になる
+        assert result["date"] == [[0, 0], [357, 4], [357, 35], [0, 31]]
+        # amount も同じオフセットでシフトされる
+        assert result["amount"] == [[400, 66], [480, 66], [480, 106], [400, 106]]
+
+    def test_no_date_box_returns_none(self):
+        assert shift_template_to_date_basis({"amount": [[1, 2], [3, 2], [3, 4], [1, 4]]}) is None
+
+    def test_malformed_date_box_returns_none(self):
+        assert shift_template_to_date_basis({"date": []}) is None
+        assert shift_template_to_date_basis({"date": [["x", "y"]]}) is None

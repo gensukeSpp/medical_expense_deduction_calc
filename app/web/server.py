@@ -5,6 +5,12 @@ from pathlib import Path
 from typing import Optional
 
 from app.services.receipt_service import ReceiptService
+from app.services.template_admin_service import (
+    ClinicNotFoundError,
+    InvalidBasisError,
+    TemplateAdminService,
+    TemplateBasisConflictError,
+)
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
@@ -24,6 +30,54 @@ def create_app(output_dir: str = "output_json", db_path: str | None = None) -> F
         db_path: Path | None = Depends(get_db_path),
     ) -> ReceiptService:
         return ReceiptService(output_dir, db_path)
+
+    def get_template_admin_service(
+        db_path: Path | None = Depends(get_db_path),
+    ) -> TemplateAdminService:
+        return TemplateAdminService(db_path)
+
+    @app.get("/admin/templates", response_class=HTMLResponse)
+    async def admin_template_list(
+        request: Request,
+        service: TemplateAdminService = Depends(get_template_admin_service),
+    ):
+        """管理画面: clinic と最新 template の一覧（coord_basis / date box 学習有無）"""
+        try:
+            template_rows = service.list_templates()
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        return templates.TemplateResponse(
+            request=request,
+            name="admin_templates.html",
+            context={"templates": template_rows},
+        )
+
+    @app.post("/admin/templates/{clinic_id}/basis")
+    async def admin_toggle_basis(
+        clinic_id: str,
+        request: Request,
+        service: TemplateAdminService = Depends(get_template_admin_service),
+    ):
+        """coord_basis を date へ手動切替（date box 学習済みのみ許可・冪等）"""
+        basis = None
+        if "application/json" in request.headers.get("content-type", ""):
+            try:
+                basis = (await request.json()).get("basis")
+            except Exception:
+                basis = None
+        else:
+            basis = (await request.form()).get("basis")
+        try:
+            result = service.toggle_basis(clinic_id, str(basis) if basis is not None else "")
+        except ClinicNotFoundError:
+            raise HTTPException(status_code=404, detail="clinic not found")
+        except TemplateBasisConflictError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except InvalidBasisError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        return result
 
     @app.get("/", response_class=HTMLResponse)
     async def read_root(request: Request, service: ReceiptService = Depends(get_receipt_service)):

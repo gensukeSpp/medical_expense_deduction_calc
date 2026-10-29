@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>テンプレート管理</title>
+</head>
+<body>
+    <h1>テンプレート管理</h1>
+    <p><a href="/">← 一覧に戻る</a></p>
+    {% if templates %}
+        <table border="1">
+            <thead>
+                <tr>
+                    <th>クリニック名</th>
+                    <th>版</th>
+                    <th>coord_basis</th>
+                    <th>date box 学習</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in templates %}
+                <tr>
+                    <td>{{ t.clinic_name }}</td>
+                    <td>{{ t.version }}</td>
+                    <td>{{ t.basis }}</td>
+                    <td>{{ "○" if t.date_box_learned else "×" }}</td>
+                    <td>
+                        {% if t.basis == "date" %}
+                            移行済み
+                        {% elif t.date_box_learned %}
+                            <form method="post" action="/admin/templates/{{ t.clinic_id }}/basis">
+                                <input type="hidden" name="basis" value="date" />
+                                <button type="submit">topmost → date へ切替</button>
+                            </form>
+                        {% else %}
+                            date box 未学習のため切替不可
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p>テンプレートがありません</p>
+    {% endif %}
+</body>
+</html>

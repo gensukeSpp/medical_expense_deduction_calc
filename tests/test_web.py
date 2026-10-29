@@ -376,3 +376,107 @@ def test_correction_low_confidence_skips_template(tmp_path):
 
         updated = json.load(open(out_dir / "receipt-001-structured_data.json", encoding="utf-8"))
         assert updated["amount"] == 5000
+
+
+def _seed_template_clinic(temp_db: Path, name: str = "なの花薬局", with_date_box: bool = True) -> str:
+    """clinic + template を作成し clinic_id を返す（date box 有無は引数で制御）。"""
+    from app.db import get_or_create_clinic, upsert_template
+
+    clinic_id = get_or_create_clinic(temp_db, name)
+    coords = {"amount": [[443, 300], [523, 300], [523, 340], [443, 340]]}
+    if with_date_box:
+        coords["date"] = [[43, 234], [400, 238], [400, 269], [43, 265]]
+    upsert_template(
+        temp_db,
+        f"tpl-{clinic_id}",
+        clinic_id,
+        version=1,
+        coords_corrections=coords,
+    )
+    return clinic_id
+
+
+def test_admin_index_lists_clinic_and_basis(client, temp_db):
+    """GET /admin/templates が clinic・coord_basis・date box 学習有無を表示する"""
+    _seed_template_clinic(temp_db, "なの花薬局札幌二十四軒店")
+    response = client.get("/admin/templates")
+    assert response.status_code == 200
+    assert "なの花薬局札幌二十四軒店" in response.text
+    assert "topmost" in response.text
+
+
+def test_index_links_to_admin(client):
+    """index.html から管理画面へのリンクが存在する"""
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "/admin/templates" in response.text
+
+
+def test_admin_toggle_success(client, temp_db):
+    """POST で coord_basis が date になり template_history に記録される（受入条件 1・2）"""
+    clinic_id = _seed_template_clinic(temp_db)
+    response = client.post(f"/admin/templates/{clinic_id}/basis", json={"basis": "date"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "updated"
+
+    import sqlite3
+    from app.db import get_latest_template_by_clinic
+
+    conn = sqlite3.connect(str(temp_db))
+    template = get_latest_template_by_clinic(temp_db, clinic_id)
+    assert (template or {}).get("coord_basis") == "date"
+    # シフト後: date box の min が原点 (0,0)
+    assert template["coords_corrections"]["date"] == [[0, 0], [357, 4], [357, 35], [0, 31]]
+    row = conn.execute(
+        "SELECT change_reason, coords_corrections FROM template_history ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    assert row is not None and row[0] == "manual_basis_toggle"
+    assert row[1] is not None  # 移行前 coords が保存されている
+
+
+def test_admin_toggle_idempotent(client, temp_db):
+    """既に date なら no-op（受入条件 4: 二重変換しない）"""
+    clinic_id = _seed_template_clinic(temp_db)
+    client.post(f"/admin/templates/{clinic_id}/basis", json={"basis": "date"})
+    response = client.post(f"/admin/templates/{clinic_id}/basis", json={"basis": "date"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "noop"
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(temp_db))
+    count = conn.execute("SELECT COUNT(*) FROM template_history").fetchone()[0]
+    conn.close()
+    assert count == 1  # history は 1 件のまま
+
+
+def test_admin_toggle_requires_date_box(client, temp_db):
+    """date box 未学習の clinic は 409（受入条件 3: 誤書き換えしない）"""
+    clinic_id = _seed_template_clinic(temp_db, with_date_box=False)
+    response = client.post(f"/admin/templates/{clinic_id}/basis", json={"basis": "date"})
+    assert response.status_code == 409
+    assert response.json()["detail"] == "date box 未学習のため切替できません"
+
+
+def test_admin_toggle_unknown_clinic(client, temp_db):
+    """存在しない clinic_id は 404"""
+    response = client.post("/admin/templates/no-such-id/basis", json={"basis": "date"})
+    assert response.status_code == 404
+
+
+def test_admin_toggle_invalid_basis(client, temp_db):
+    """不対応の basis 値は 400"""
+    clinic_id = _seed_template_clinic(temp_db)
+    response = client.post(f"/admin/templates/{clinic_id}/basis", json={"basis": "topmost"})
+    assert response.status_code == 400
+
+
+def test_admin_db_not_configured(tmp_path):
+    """db_path 未設定なら管理 API は 503"""
+    out_dir = tmp_path / "output_json"
+    out_dir.mkdir()
+    app = create_app(output_dir=str(out_dir), db_path=None)
+    with TestClient(app) as c:
+        assert c.get("/admin/templates").status_code == 503
+        assert c.post("/admin/templates/x/basis", json={"basis": "date"}).status_code == 503

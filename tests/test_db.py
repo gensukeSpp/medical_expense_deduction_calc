@@ -11,6 +11,8 @@ from app.db import (
     get_receipt,
     upsert_clinic,
     get_clinic_by_name,
+    get_clinic_by_id,
+    get_or_create_clinic,
     get_all_clinics,
     upsert_template,
     get_all_templates_with_names,
@@ -314,3 +316,15 @@ def test_get_all_templates_with_names_empty(temp_db: Path) -> None:
     """テンプレート未登録時に空リストが返る"""
     templates = get_all_templates_with_names(temp_db)
     assert templates == []
+
+
+class TestGetClinicById:
+    def test_returns_clinic_dict(self, temp_db: Path):
+        clinic_id = get_or_create_clinic(temp_db, "あおばクリニック")
+        row = get_clinic_by_id(temp_db, clinic_id)
+        assert row is not None
+        assert row["id"] == clinic_id
+        assert row["name"] == "あおばクリニック"
+
+    def test_returns_none_for_unknown_id(self, temp_db: Path):
+        assert get_clinic_by_id(temp_db, "no-such-id") is None

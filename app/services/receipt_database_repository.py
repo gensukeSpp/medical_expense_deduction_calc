@@ -9,6 +9,7 @@ from app.db import (
     add_correction,
     get_receipt_by_source_path,
     get_or_create_clinic,
+    get_clinic_by_id,
     get_db_connection,
     get_latest_template_by_clinic,
 )
@@ -126,6 +127,19 @@ class ReceiptDatabaseRepository:
         if not self.is_available():
             raise RuntimeError("Database is not available")
         return get_or_create_clinic(self.db_path, name)
+
+    def get_clinic_by_id(self, clinic_id: str) -> Optional[Dict[str, Any]]:
+        """Get a clinic by its ID, or None if it does not exist.
+
+        Args:
+            clinic_id: The clinic ID.
+
+        Returns:
+            Clinic dict with keys id, name, created_at, or None.
+        """
+        if not self.is_available():
+            return None
+        return get_clinic_by_id(self.db_path, clinic_id)
 
     def get_latest_template_by_clinic(self, clinic_id: str) -> Optional[Dict[str, Any]]:
         """
