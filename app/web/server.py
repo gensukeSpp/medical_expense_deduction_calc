@@ -58,8 +58,9 @@ def create_app(output_dir: str = "output_json", db_path: str | None = None) -> F
         service: TemplateAdminService = Depends(get_template_admin_service),
     ):
         """coord_basis を date へ手動切替（date box 学習済みのみ許可・冪等）"""
+        is_json_request = "application/json" in request.headers.get("content-type", "")
         basis = None
-        if "application/json" in request.headers.get("content-type", ""):
+        if is_json_request:
             try:
                 basis = (await request.json()).get("basis")
             except Exception:
@@ -67,7 +68,7 @@ def create_app(output_dir: str = "output_json", db_path: str | None = None) -> F
         else:
             basis = (await request.form()).get("basis")
         try:
-            service.toggle_basis(clinic_id, str(basis) if basis is not None else "")
+            result = service.toggle_basis(clinic_id, str(basis) if basis is not None else "")
         except ClinicNotFoundError:
             raise HTTPException(status_code=404, detail="clinic not found")
         except TemplateBasisConflictError as e:
@@ -76,6 +77,8 @@ def create_app(output_dir: str = "output_json", db_path: str | None = None) -> F
             raise HTTPException(status_code=400, detail=str(e))
         except RuntimeError as e:
             raise HTTPException(status_code=503, detail=str(e))
+        if is_json_request:
+            return result
         return RedirectResponse(url="/admin/templates", status_code=303)
 
     @app.get("/", response_class=HTMLResponse)
