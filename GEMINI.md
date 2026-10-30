@@ -23,7 +23,7 @@ The primary goal is to simplify data entry for medical expenses within a househo
 - `app/`: Contains core application logic.
     - `app/ocr_pipeline.py`: Logic for PaddleOCR-based text and coordinate extraction.
     - `app/image_preprocessing.py`: Image preprocessing utilities (CLAHE, adaptive thresholding).
-    - `app/coord_normalizer.py`: Coordinate normalization, anchor-based relative normalization (`normalize_coordinates_by_anchor`), and topmost confidence checking (`get_topmost_confidence`).
+    - `app/coord_normalizer.py`: Coordinate normalization, anchor-based relative normalization (`normalize_coordinates_by_anchor`), template date basis shifting (`shift_template_to_date_basis`), and topmost confidence checking (`get_topmost_confidence`).
     - `app/date_anchor.py`: Date anchor resolution and re-normalization orchestration using clinic template date coordinates.
     - `app/image_resize.py`: Image pre-processing utilities (resizing, scaling).
     - `app/watcher.py`: Directory watcher tracking incoming receipts and triggering processing.
@@ -61,6 +61,10 @@ python tasks/issue_4/run_e2e.py
 
 ### Implemented Features (as of 2026-10-08)
 - Complete pipeline integration (OCR + LLM Extraction + Normalization + Automatic Parsing).
+- **Manual Coordinate Basis Toggle & Admin (Issue #42)**:
+  - Added Web administration interface (`GET /admin/templates` and `POST /admin/templates/{clinic_id}/basis`) to manually switch template `coord_basis` from `topmost` to `date` as a verification fallback.
+  - Implemented `TemplateAdminService` (`app/services/template_admin_service.py`) for business logic encapsulation and safe transition validation (requires learned date box, records `manual_basis_toggle` in `template_history`).
+  - Added shared template shifting helper `shift_template_to_date_basis` in `app/coord_normalizer.py` to ensure consistency between automatic and manual migrations.
 - **Date-Based Coordinate Normalization (Issue #39)**:
   - Added `app/date_anchor.py` to resolve structured date to specific OCR text boxes using clinic template date coordinates as positional hints.
   - Implemented anchor-based coordinate re-normalization (`normalize_coordinates_by_anchor` in `app/coord_normalizer.py`) and template coordinate shifting (`shift_template_coords`).

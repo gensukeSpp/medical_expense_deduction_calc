@@ -90,7 +90,7 @@ class ImageProcessingService:
         if structured and db_path and not low_confidence:
             from app.date_anchor import apply_date_anchor_normalization
 
-            apply_date_anchor_normalization(active_raw_path, structured, db_path)
+            apply_date_anchor_normalization(active_raw_path, structured, db_path, output_dir=output_dir)
 
         if low_confidence:
             self._apply_low_confidence_flag(image_path, output_dir, mtime)

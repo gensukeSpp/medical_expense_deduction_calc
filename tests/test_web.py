@@ -435,6 +435,18 @@ def test_admin_toggle_success(client, temp_db):
     assert row[1] is not None  # 移行前 coords が保存されている
 
 
+def test_admin_toggle_form_redirects_to_templates(client, temp_db):
+    """管理画面フォームの送信後はテンプレート一覧へ 303 リダイレクトする"""
+    clinic_id = _seed_template_clinic(temp_db)
+    response = client.post(
+        f"/admin/templates/{clinic_id}/basis",
+        data={"basis": "date"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/admin/templates"
+
+
 def test_admin_toggle_idempotent(client, temp_db):
     """既に date なら no-op（受入条件 4: 二重変換しない）"""
     clinic_id = _seed_template_clinic(temp_db)

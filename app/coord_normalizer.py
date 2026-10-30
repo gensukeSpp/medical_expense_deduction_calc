@@ -29,10 +29,6 @@ def _find_min_coords(ocr_entries: List[Dict[str, Any]]) -> tuple[Optional[int], 
         if not box or not isinstance(box, list):
             continue
 
-        """
-        無効な形式の座標点（リストやタプルではない、または要素数が2未満のもの）が含まれている場合、\n
-        非辞書型の要素が ocr_entries に混入した場合の防御的プログラミングも考慮し、事前に有効な座標点（valid_points）を抽出して処理する
-        """
         valid_points = [p for p in box if isinstance(p, (list, tuple)) and len(p) >= 2]
         if not valid_points:
             continue
@@ -54,9 +50,31 @@ def _find_min_coords(ocr_entries: List[Dict[str, Any]]) -> tuple[Optional[int], 
 
 
 def _subtract_offset(box: List[List[int]], offset_x: int, offset_y: int) -> List[List[int]]:
-    """Subtract offset from all points in a box."""
+    """Subtract offset from all points in a box.
+
+    Args:
+        box: List of [x, y] coordinate points.
+        offset_x: X offset to subtract.
+        offset_y: Y offset to subtract.
+
+    Returns:
+        New list of points with offset subtracted.
+    """
     # box 内に無効な座標点（None や空リストなど）が含まれている場合、スキップ
     return [[p[0] - offset_x, p[1] - offset_y] for p in box if isinstance(p, (list, tuple)) and len(p) >= 2]
+
+
+def _subtract_offset_filtered(box: List[List[int]], offset_x: int, offset_y: int) -> List[List[int]]:
+    """Subtract offset from valid numeric points in a box, skipping non-numeric points."""
+    result = []
+    for p in box:
+        if (
+            isinstance(p, (list, tuple))
+            and len(p) >= 2
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in p[:2])
+        ):
+            result.append([p[0] - offset_x, p[1] - offset_y])
+    return result
 
 
 def normalize_coordinates(raw_data_path: Path) -> Dict[str, Any]:
@@ -198,6 +216,7 @@ def normalize_coordinates_by_anchor(raw_data_path: Path, anchor_box: List[List[i
     offset_x = min(p[0] for p in valid_points)
     offset_y = min(p[1] for p in valid_points)
 
+    # Normalize coordinates: subtract offset from all box points
     normalized_entries = []
     for entry in ocr_entries:
         box = entry.get("box")
@@ -205,6 +224,7 @@ def normalize_coordinates_by_anchor(raw_data_path: Path, anchor_box: List[List[i
             entry["box"] = _subtract_offset(box, offset_x, offset_y)
         normalized_entries.append(entry)
 
+    # Write back atomically
     from app.output import write_json_atomic
 
     write_json_atomic(raw_data_path, normalized_entries)
@@ -215,36 +235,6 @@ def normalize_coordinates_by_anchor(raw_data_path: Path, anchor_box: List[List[i
         "offset_x": offset_x,
         "offset_y": offset_y,
     }
-
-
-def shift_template_coords(
-    coords: Dict[str, Any],
-    offset_x: int,
-    offset_y: int,
-) -> Dict[str, Any]:
-    """Shift all template coordinate boxes by a given offset.
-
-    Shifts every box in ``coords_corrections`` so the template adopts the new
-    coordinate basis (e.g. topmost -> date anchor). Supports both single-box
-    (4-point polygon) and multi-box (list of polygons) field values.
-
-    Args:
-        coords: Template coords_corrections dict (field -> box or list of boxes).
-        offset_x: X offset subtract.
-        offset_y: Y offset subtract.
-
-    Returns:
-        A new dict with all boxes shifted.
-    """
-    shifted: Dict[str, Any] = {}
-    for field_name, box in coords.items():
-        if box is None:
-            shifted[field_name] = None
-        elif _is_multi_box(box):
-            shifted[field_name] = [_subtract_offset(sub_box, offset_x, offset_y) for sub_box in box]
-        else:
-            shifted[field_name] = _subtract_offset(box, offset_x, offset_y)
-    return shifted
 
 
 def _is_multi_box(value: Any) -> bool:
@@ -267,6 +257,56 @@ def _is_numeric_point(p: Any) -> bool:
     return all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in p[:2])
 
 
+def _has_any_numeric_point(box: Any) -> bool:
+    """Check if a box (single or multi-box) contains any numeric coordinate points.
+
+    For single-box: [[x1,y1],[x2,y2],[x3,y3],[x4,y4]] - checks all 4 points
+    For multi-box: [[[x1,y1],[x2,y2],...], [[x1,y1],[x2,y2],...]] - checks all points in all boxes
+    """
+    if _is_multi_box(box):
+        # Multi-box: iterate through all sub-boxes and their points
+        for sub_box in box:
+            if not isinstance(sub_box, list) or not sub_box:
+                continue
+            for p in sub_box:
+                if _is_numeric_point(p):
+                    return True
+        return False
+    else:
+        # Single-box: check all points in the box
+        return any(_is_numeric_point(p) for p in box)
+
+
+def shift_template_coords(
+    coords: Dict[str, Any],
+    offset_x: int,
+    offset_y: int,
+) -> Dict[str, Any]:
+    """Shift all template coordinate boxes by a given offset.
+
+    Shifts every box in ``coords_corrections`` so the template adopts the new
+    coordinate basis (e.g. topmost -> date anchor). Supports both single-box
+    and multi-box field values.
+
+    Args:
+        coords: Template coords_corrections dict (field -> box or list of boxes).
+        offset_x: X offset subtract.
+        offset_y: Y offset subtract.
+
+    Returns:
+        A new dict with all boxes shifted.
+    """
+    shifted: Dict[str, Any] = {}
+    for field_name, box in coords.items():
+        if box is None:
+            shifted[field_name] = None
+        elif _is_multi_box(box):
+            shifted[field_name] = [_subtract_offset_filtered(sub_box, offset_x, offset_y) for sub_box in box]
+        else:
+            shifted[field_name] = _subtract_offset(box, offset_x, offset_y)
+    return shifted
+
+
 def shift_template_to_date_basis(coords: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Shift template coords so the template's own date box becomes the origin.
 
@@ -283,7 +323,19 @@ def shift_template_to_date_basis(coords: Dict[str, Any]) -> Optional[Dict[str, A
     date_box = coords.get("date")
     if not isinstance(date_box, (list, tuple)) or not date_box:
         return None
-    valid_points = [p for p in date_box if _is_numeric_point(p)]
+    # Handle both single-box and multi-box formats
+    if _is_multi_box(date_box):
+        # Multi-box: find valid points across all sub-boxes
+        valid_points: List[Any] = []
+        for sub_box in date_box:
+            if not isinstance(sub_box, list) or not sub_box:
+                continue
+            for p in sub_box:
+                if _is_numeric_point(p):
+                    valid_points.append(p)
+    else:
+        # Single-box: use existing logic
+        valid_points = [p for p in date_box if _is_numeric_point(p)]
     if not valid_points:
         return None
     offset_x = min(p[0] for p in valid_points)

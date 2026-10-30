@@ -19,3 +19,5 @@ This directory contains dated snapshots of the project's high-level architecture
 | 2026-07-16 | Architecture snapshot for implementing hybrid template matching for robust OCR data extraction (Issue #34). | [2026-07-16-architecture.md](2026-07-16-architecture.md) |
 | 2026-10-02 | Architecture snapshot for OCR preprocessing, CLAHE, adaptive thresholding, and retry logic (Issue #36 / PR #37). | [2026-10-02-architecture.md](2026-10-02-architecture.md) |
 | 2026-10-08 | Architecture snapshot for date-based coordinate normalization and template basis migration (Issue #39). | [2026-10-08-architecture.md](2026-10-08-architecture.md) |
+| 2026-10-27 | Architecture snapshot for manual coordinate basis toggling (topmost -> date) via Web admin (Issue #42 / PR #45). | [2026-10-27-architecture.md](2026-10-27-architecture.md) |
+| 2026-10-30 | Architecture snapshot for PR #46 (PR #45 review responses, layout consistency scoring, web admin 303 redirection, multi-box hardening). | [2026-10-30-architecture.md](2026-10-30-architecture.md) |

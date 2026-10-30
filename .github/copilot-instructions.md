@@ -4,13 +4,11 @@ This repo implements an OCR-driven workflow for medical receipts used in tax ded
 
 ## Build, test, and lint
 
-Use Python 3.11+ and the project-managed `uv` environment.
+Use Python 3.11+ and the project-managed `uv` environment. Dependencies are declared in
+`pyproject.toml` and pinned in `uv.lock`.
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-uv pip install --upgrade uv[all]
-uv add --editable .
+uv sync
 ```
 
 Run the app:
@@ -28,26 +26,24 @@ uv run main.py --input-json path/to/ocr_data.json --output-dir output_json
 # Start the review UI
 uv run main.py --serve --db-path data/db.sqlite3
 
-# Initialize SQLite schema once
-python -m app.db_migrations init --db-path data/db.sqlite3
+# Initialize or migrate the SQLite schema
+uv run python -m app.db_migrations init --db-path data/db.sqlite3
 ```
 
 Run tests:
 
 ```bash
-pytest -q
-pytest tests/test_normalization.py -v
-pytest tests/test_normalization.py::test_parse_amount_numeric -v
-pytest -k "test_parse" -v
-uv run tasks/issue_4/run_e2e.py
+uv run pytest -q
+uv run pytest tests/test_normalization.py -v
+uv run pytest tests/test_normalization.py::test_parse_amount_numeric -v
+uv run pytest -k "test_parse" -v
 ```
 
 Format and lint checks:
 
 ```bash
-black .
-black path/to/file.py
-black --check .
+uv run black --check .
+uv run black path/to/file.py
 ```
 
 Project defaults from `pyproject.toml`: Black is configured with `line-length = 119`.
@@ -82,20 +78,28 @@ receipt image
 
 Two processing paths matter in practice:
 
-1. Image -> structured JSON: `main.py -> processor.py -> OCR pipeline -> extraction -> normalization -> save`
-2. Existing OCR JSON -> structured data: `main.py -> structural_parser.process_input_json()`
+1. Image -> structured JSON: `main.py -> processor.py -> ImageProcessingService` (or
+   `ReceiptProcessor` for watcher processing) -> OCR -> extraction/normalization -> persistence/output.
+2. Existing OCR JSON -> structured data: `main.py -> structural_parser.process_input_json()` -> the
+   same extraction/normalization/persistence/output stages.
 
 Preserve that layering when changing code: OCR, normalization, persistence, and review UI each have distinct responsibilities.
+Date-anchor normalization is an image/watcher-only follow-up; the existing-JSON path intentionally retains
+topmost-based coordinates for compatibility. Do not re-run `process_input_json()` after applying an anchor:
+that path inserts a receipt, so reprocessing can create a duplicate. Persist coordinate synchronization through
+the existing database update path instead.
 
 ## Key conventions
 
 - Prefer the service/repository boundary already in `app/services/` and `app/db.py` instead of embedding DB logic in the web UI or parser layer.
 - Keep CLI behavior centralized in `app/args.py`; when adding options, follow the existing `--watch`, `--input-json`, `--serve`, and `--db-path` patterns.
-- `docs/schema.sql` is the source of truth for SQLite structure; if `--db-path` is used, initialize the schema with `python -m app.db_migrations init --db-path data/db.sqlite3`.
+- `docs/schema.sql` is the source of truth for SQLite structure; implement schema evolution through the idempotent migrations in `app/db_migrations.py`.
 - Template matching is proximity-first and coordinate-aware. The repo uses hybrid matching: exact clinic name match, then text similarity, then layout-based matching (50px proximity / 60% field match).
-- `low_confidence` receipts are special: they still record corrections, but template updates are skipped for those records to avoid poisoning the learning loop.
+- Coordinate bases must stay consistent: templates are marked `topmost` or `date` with `coord_basis`. The admin flow only supports a guarded topmost-to-date transition when a date box is learned; use `TemplateAdminService` and the existing transactional DB operation rather than editing template coordinates or basis directly.
+- `low_confidence` receipts (topmost OCR confidence below 0.8) skip coordinate normalization and may trigger one preprocessing OCR retry when enabled. User corrections are still recorded, but template learning is skipped for these receipts.
 - Keep formatting consistent with existing imports and Black style: stdlib -> third-party -> local; line length is 119.
-- Prefer targeted validation (`pytest tests/...` or `pytest -k <pattern>`) before broader runs; this repo is test-friendly but not heavy on full-suite execution.
+- CLI option details live in `.hermes/rules/cli.md`; coordinate-basis and date-anchor constraints in `.hermes/rules/coordinate-normalization.md`; preprocessing and output naming in `.hermes/rules/ocr-preprocessing.md`.
+- Prefer targeted validation (`uv run pytest tests/...` or `uv run pytest -k <pattern>`) before broader runs.
 
 ## Project-specific notes
 
