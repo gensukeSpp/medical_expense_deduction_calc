@@ -274,6 +274,7 @@ refactor #<issue>: <description>
 - 開発環境: `docs/DEVELOPMENT.md`
 - スキーマ: `docs/schema.sql`
 - アーキテクチャスナップショット: `docs/architecture/` 配下
+- date anchor 実データ検証ツール: `app/verify_date_anchor.py`（[tasks/issue_47/](tasks/issue_47/overview.md)）
 - 変更頻度の高いルール (`rules`):
   - CLI 使い方・引数一覧: `.hermes/rules/cli.md`
   - OCR 前処理・出力ファイル命名: `.hermes/rules/ocr-preprocessing.md`

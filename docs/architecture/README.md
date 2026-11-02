@@ -21,3 +21,4 @@ This directory contains dated snapshots of the project's high-level architecture
 | 2026-10-08 | Architecture snapshot for date-based coordinate normalization and template basis migration (Issue #39). | [2026-10-08-architecture.md](2026-10-08-architecture.md) |
 | 2026-10-27 | Architecture snapshot for manual coordinate basis toggling (topmost -> date) via Web admin (Issue #42 / PR #45). | [2026-10-27-architecture.md](2026-10-27-architecture.md) |
 | 2026-10-30 | Architecture snapshot for PR #46 (PR #45 review responses, layout consistency scoring, web admin 303 redirection, multi-box hardening). | [2026-10-30-architecture.md](2026-10-30-architecture.md) |
+| 2026-11-02 | Architecture snapshot for date-anchor coordinate re-normalization verification tool and spec (Issue #47 / PR #49). | [2026-11-02-architecture.md](2026-11-02-architecture.md) |

@@ -59,8 +59,12 @@ python tasks/issue_4/run_e2e.py
 
 ## Current Progress & Upcoming Tasks
 
-### Implemented Features (as of 2026-10-08)
+### Implemented Features (as of 2026-11-02)
 - Complete pipeline integration (OCR + LLM Extraction + Normalization + Automatic Parsing).
+- **Date-Anchor Verification Tool & Spec (Issue #47 / PR #49)**:
+  - Added `app/verify_date_anchor.py` as a non-destructive, read-only CLI verification tool for tracing and validating date-anchor re-normalization and coordinate extraction pipeline stages (`find_date_candidates` → `resolve_date_anchor` → `normalize_coordinates_by_anchor` → `search_fields_by_proximity`) using safe copy-on-verify isolation.
+  - Added comprehensive unit tests in `tests/test_verify_date_anchor.py` covering success flows, topmost basis preconditions, missing templates, and ambiguous/tie candidate resolution (safe fallback).
+  - Added formal specification (`specs/2026-11-02-spec.md`) and task documentation.
 - **Manual Coordinate Basis Toggle & Admin (Issue #42)**:
   - Added Web administration interface (`GET /admin/templates` and `POST /admin/templates/{clinic_id}/basis`) to manually switch template `coord_basis` from `topmost` to `date` as a verification fallback.
   - Implemented `TemplateAdminService` (`app/services/template_admin_service.py`) for business logic encapsulation and safe transition validation (requires learned date box, records `manual_basis_toggle` in `template_history`).
