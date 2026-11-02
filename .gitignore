@@ -16,6 +16,8 @@ processed/
 data/
 uv.lock
 logs/
+verify_logs/
+tmp/
 test*.db
 
 # Added by code-review-graph

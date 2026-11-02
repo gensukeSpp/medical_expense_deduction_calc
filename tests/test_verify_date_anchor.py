@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app.verify_date_anchor import verify_date_anchor, EXIT_OK, EXIT_UNRESOLVED
+from app.verify_date_anchor import verify_date_anchor, EXIT_OK, EXIT_UNRESOLVED, main
 
 
 def _write_json(path: Path, data) -> None:
@@ -70,8 +70,13 @@ def _seed_date_basis_template(db_path: Path, clinic_name: str, template_coords: 
     con.close()
 
 
-def test_success_reports_stages_and_keeps_originals(tmp_path: Path):
+def test_success_reports_stages_and_keeps_originals(tmp_path: Path, capsys):
     work = tmp_path / "verify"
+    work.mkdir()
+    existing_raw = work / "raw_data.json"
+    existing_raw.write_text("keep existing data", encoding="utf-8")
+    existing_db = work / "db.sqlite3"
+    existing_db.write_text("keep existing database", encoding="utf-8")
     anchor_tl, template_coords, raw_coords = _date_basis_geometry()
 
     raw = tmp_path / "raw_data.json"
@@ -98,7 +103,39 @@ def test_success_reports_stages_and_keeps_originals(tmp_path: Path):
     assert report["resolution"]["ok"] is True
     assert report["renormalization"]["ok"] is True
     assert isinstance(report["renormalization"]["offset_x"], (int, float))
+    normalized_boxes = report["renormalization"]["normalized_boxes"]
+    assert normalized_boxes["date"]["box"] == _box((0, 0), (273, 35))
+    assert normalized_boxes["name"]["box"] == _box((5, -176), (148, -107))
+    assert normalized_boxes["amount"]["box"] == _box((377, 418), (481, 455))
     assert "name" in report["extraction"] or "amount" in report["extraction"]
+    assert Path(report["workdir"]).parent == work
+
+    report_path = tmp_path / "report.json"
+    assert (
+        main(
+            [
+                "--raw",
+                str(raw),
+                "--structured",
+                str(structured),
+                "--db",
+                str(db),
+                "--workdir",
+                str(work),
+                "--report",
+                str(report_path),
+            ]
+        )
+        == EXIT_OK
+    )
+    output = capsys.readouterr().out
+    saved_report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert saved_report["renormalization"]["normalized_boxes"]["date"]["box"] == _box((0, 0), (273, 35))
+    assert "再正規化後 date box=" in output
+    assert "box=" in output
+    assert Path(report["workdir"]) != Path(output.split("作業コピー: ")[-1].strip())
+    assert existing_raw.read_text(encoding="utf-8") == "keep existing data"
+    assert existing_db.read_text(encoding="utf-8") == "keep existing database"
     assert raw.read_bytes() == before_raw, "raw が変更されている"
     assert db.read_bytes() == before_db, "DB が変更されている"
 
@@ -189,3 +226,30 @@ def test_tie_date_candidates_returns_unresolved(tmp_path: Path):
     assert "renormalization" not in report
     assert raw.read_bytes() == before_raw, "raw が変更されている"
     assert db.read_bytes() == before_db, "DB が変更されている"
+
+
+def test_default_workdir_is_cleaned_on_return_and_exception(tmp_path: Path, monkeypatch):
+    import app.verify_date_anchor as verify_module
+
+    original_temporary_directory = verify_module.tempfile.TemporaryDirectory
+    created = []
+
+    def track_temporary_directory(*args, **kwargs):
+        directory = original_temporary_directory(*args, **kwargs)
+        created.append(Path(directory.name))
+        return directory
+
+    monkeypatch.setattr(verify_module.tempfile, "TemporaryDirectory", track_temporary_directory)
+
+    raw = tmp_path / "raw.json"
+    _write_json(raw, [])
+    structured = tmp_path / "structured.json"
+    _write_json(structured, {"clinic": "Clinic", "date": "2026-09-02"})
+    report = verify_date_anchor(raw, structured, None)
+    assert report["precondition"]["ok"] is False
+    assert created[-1].exists() is False
+
+    structured.write_text("{invalid json", encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        verify_date_anchor(raw, structured, None)
+    assert created[-1].exists() is False
