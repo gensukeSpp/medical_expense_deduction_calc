@@ -228,6 +228,37 @@ def test_tie_date_candidates_returns_unresolved(tmp_path: Path):
     assert db.read_bytes() == before_db, "DB が変更されている"
 
 
+def test_verify_force_extracts_when_anchor_none(tmp_path: Path):
+    """force=True のとき、anchor 解決が不能でも coords_corrections で近傍抽出する (Issue #50)."""
+    work = tmp_path / "verify"
+    _, template_coords, _ = _date_basis_geometry()
+    # date 候補 0 件: raw に date と一致する OCR テキストを含めない
+    # （座標は date 基準の template coords と一致させる -> 近傍抽出が成立する）
+    raw = tmp_path / "raw_data.json"
+    _write_json(
+        raw,
+        [
+            {"text": "なの花薬局", "box": template_coords["name"]},
+            {"text": "1450", "box": template_coords["amount"]},
+        ],
+    )
+    structured = tmp_path / "structured_data.json"
+    _write_json(structured, {"clinic": "なの花薬局", "date": "2026-09-02"})
+    db = tmp_path / "db.sqlite3"
+    _seed_date_basis_template(db, "なの花薬局", template_coords)
+
+    report = verify_date_anchor(raw, structured, db, workdir=work, force=True)
+
+    assert report["precondition"]["ok"] is True
+    assert report["resolution"]["ok"] is True
+    assert report["resolution"]["mode"] == "force"
+    assert report["resolution"]["anchor_box"] is None
+    assert "name" in report["force_extraction"]
+    assert report["force_extraction"]["name"] == "なの花薬局"
+    assert report["force_extraction"]["amount"] == "1450"
+    assert "renormalization" not in report
+
+
 def test_default_workdir_is_cleaned_on_return_and_exception(tmp_path: Path, monkeypatch):
     import app.verify_date_anchor as verify_module
 
