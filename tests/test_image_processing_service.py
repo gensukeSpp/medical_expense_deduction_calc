@@ -316,6 +316,64 @@ class TestProcess:
 
         mock_anchor.assert_not_called()
 
+    def test_process_calls_force_when_anchor_none(
+        self, service: ImageProcessingService, image_path: Path, output_dir: Path
+    ):
+        """apply_date_anchor_normalization が None のとき apply_date_basis_force が呼ばれる (Issue #50)."""
+        mtime = int(image_path.stat().st_mtime)
+        raw_path = output_dir / f"receipt-001_{mtime}-raw_data.json"
+
+        with (
+            patch.object(service, "_run_ocr"),
+            patch.object(service, "_get_topmost_confidence", return_value=(False, 0.95)),
+            patch.object(service, "_normalize_coords", return_value=False),
+            patch.object(service, "_parse_structured", return_value={"clinic": "A", "date": "2026-01-15"}),
+            patch("app.date_anchor.apply_date_anchor_normalization", return_value=None) as mock_anchor,
+            patch("app.date_anchor.apply_date_basis_force") as mock_force,
+        ):
+            service.process(image_path, output_dir, model="mock", db_path="/tmp/db.sqlite3")
+
+        mock_anchor.assert_called_once()
+        mock_force.assert_called_once_with(
+            raw_path, {"clinic": "A", "date": "2026-01-15"}, "/tmp/db.sqlite3", output_dir=output_dir
+        )
+
+    def test_process_does_not_call_force_when_anchor_resolved(
+        self, service: ImageProcessingService, image_path: Path, output_dir: Path
+    ):
+        """anchor 解決成功時は force を呼ばない（二重補正防止）."""
+        mtime = int(image_path.stat().st_mtime)
+
+        with (
+            patch.object(service, "_run_ocr"),
+            patch.object(service, "_get_topmost_confidence", return_value=(False, 0.95)),
+            patch.object(service, "_normalize_coords", return_value=False),
+            patch.object(service, "_parse_structured", return_value={"clinic": "A", "date": "2026-01-15"}),
+            patch("app.date_anchor.apply_date_anchor_normalization", return_value=(0, 0)) as mock_anchor,
+            patch("app.date_anchor.apply_date_basis_force") as mock_force,
+        ):
+            service.process(image_path, output_dir, model="mock", db_path="/tmp/db.sqlite3")
+
+        mock_anchor.assert_called_once()
+        mock_force.assert_not_called()
+
+    def test_process_does_not_call_force_when_low_confidence(
+        self, service: ImageProcessingService, image_path: Path, output_dir: Path
+    ):
+        """低Confidence時は date anchor も force も実行しない."""
+        with (
+            patch.object(service, "_run_ocr"),
+            patch.object(service, "_get_topmost_confidence", return_value=(True, 0.5)),
+            patch.object(service, "_normalize_coords", return_value=True),
+            patch.object(service, "_parse_structured", return_value={"clinic": "A", "date": "2026-01-15"}),
+            patch("app.date_anchor.apply_date_anchor_normalization", return_value=None) as mock_anchor,
+            patch("app.date_anchor.apply_date_basis_force") as mock_force,
+        ):
+            service.process(image_path, output_dir, model="mock", db_path="/tmp/db.sqlite3")
+
+        mock_anchor.assert_not_called()
+        mock_force.assert_not_called()
+
 
 class TestProcessPreprocessRetry:
     def test_low_confidence_triggers_preprocess_retry_keeps_both_raw(self, service, image_path, output_dir, tmp_path):
