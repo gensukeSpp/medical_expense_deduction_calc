@@ -172,23 +172,101 @@ class TestProcessCorrectionFeedback:
         assert template["version"] == 1
         assert template["coords_corrections"]["amount"] == field_coords["amount"]
 
-    def test_resets_coord_basis_to_topmost_after_correction_on_date_template(self, temp_db, seed_clinic_and_receipt):
-        """Issue #51: coord_basis='date' のテンプレに topmost 基準で修正すると topmost に戻る"""
+    def test_keeps_date_basis_and_converts_correction_on_date_template(self, temp_db, seed_clinic_and_receipt):
+        """Issue #51(案ii): date 基準テンプレでは修正座標を date 基準へ変換し coord_basis を date 維持"""
         clinic_id = seed_clinic_and_receipt["clinic_id"]
+        receipt_id = seed_clinic_and_receipt["receipt_id"]
 
-        # date box を学習した上で coord_basis='date' の状態を作る
-        date_coords = {"date": [[50, 50], [200, 50], [200, 80], [50, 80]]}
-        template_id = str(uuid.uuid4())
+        # 実 date 基準のテンプレ（date box は原点）を coord_basis='date' で作る
+        date_coords = {"date": [[0, 0], [150, 0], [150, 30], [0, 30]]}
         upsert_template(
             temp_db,
-            template_id,
+            str(uuid.uuid4()),
             clinic_id,
             version=2,
             coords_corrections=date_coords,
             coord_basis="date",
         )
 
-        # 修正で topmost 基準の座標を書き込む（既存フィールドとは別の amount）
+        # topmost 基準の修正座標を書く（fixture の ocr_json の date box top-left=(50,50)）
+        amount_coords = [[400, 300], [480, 300], [480, 340], [400, 340]]
+        result = process_correction_feedback(
+            temp_db,
+            clinic_id,
+            {"amount": amount_coords},
+            receipt_id=receipt_id,
+        )
+        assert result["updated_fields"] == ["amount"]
+        assert result["history_id"] is not None
+
+        template = get_latest_template_by_clinic(temp_db, clinic_id)
+        assert template is not None
+        # date box top-left (50,50) で減算 → date 基準へ変換される
+        expected_amount = [[350, 250], [430, 250], [430, 290], [350, 290]]
+        assert template["coord_basis"] == "date"  # 基底は date のまま
+        assert template["coords_corrections"]["amount"] == expected_amount
+        assert template["coords_corrections"]["date"] == date_coords["date"]  # 未修正フィールドは不変
+
+    def test_date_basis_correction_noop_on_date_basis_ocr(self, temp_db, seed_clinic_and_receipt):
+        """Issue #51(案ii): date 基準 ocr_json（date box 原点）では変換は no-op"""
+        clinic_id = seed_clinic_and_receipt["clinic_id"]
+        receipt_id = seed_clinic_and_receipt["receipt_id"]
+
+        date_coords = {"date": [[0, 0], [150, 0], [150, 30], [0, 30]]}
+        upsert_template(
+            temp_db,
+            str(uuid.uuid4()),
+            clinic_id,
+            version=2,
+            coords_corrections=date_coords,
+            coord_basis="date",
+        )
+
+        # レシート ocr_json を date 基準（date box 原点）へ更新
+        conn = get_db_connection(temp_db)
+        try:
+            date_basis_ocr = [
+                {"text": "2026/01/15", "confidence": 0.90, "box": [[0, 0], [150, 0], [150, 30], [0, 30]]},
+                {"text": "3,800", "confidence": 0.88, "box": [[350, 250], [430, 250], [430, 290], [350, 290]]},
+            ]
+            with conn:
+                conn.execute(
+                    "UPDATE receipts SET ocr_json = ? WHERE id = ?",
+                    (json.dumps(date_basis_ocr, ensure_ascii=False), receipt_id),
+                )
+        finally:
+            conn.close()
+
+        # date 基準のまま修正 → 変換は no-op（date box 原点なので減算 0）
+        amount_coords = [[350, 250], [430, 250], [430, 290], [350, 290]]
+        result = process_correction_feedback(
+            temp_db,
+            clinic_id,
+            {"amount": amount_coords},
+            receipt_id=receipt_id,
+        )
+        assert result["updated_fields"] == ["amount"]
+
+        template = get_latest_template_by_clinic(temp_db, clinic_id)
+        assert template is not None
+        assert template["coord_basis"] == "date"
+        assert template["coords_corrections"]["amount"] == amount_coords
+
+    def test_skips_feedback_when_date_anchor_unresolvable(self, temp_db, seed_clinic_and_receipt):
+        """Issue #51(案ii): date テンプレで anchor 判定不能なら座標を書き込まない"""
+        clinic_id = seed_clinic_and_receipt["clinic_id"]
+
+        date_coords = {"date": [[0, 0], [150, 0], [150, 30], [0, 30]]}
+        upsert_template(
+            temp_db,
+            str(uuid.uuid4()),
+            clinic_id,
+            version=2,
+            coords_corrections=date_coords,
+            coord_basis="date",
+        )
+
+        # receipt_id=None（レシート解決不可）→ anchor 判定不能 → FB スキップ
         amount_coords = [[400, 300], [480, 300], [480, 340], [400, 340]]
         result = process_correction_feedback(
             temp_db,
@@ -196,20 +274,13 @@ class TestProcessCorrectionFeedback:
             {"amount": amount_coords},
             receipt_id=None,
         )
-        assert result["updated_fields"] == ["amount"]
+        assert result["updated_fields"] == []
+        assert result["history_id"] is None
 
         template = get_latest_template_by_clinic(temp_db, clinic_id)
         assert template is not None
-        assert template["coord_basis"] == "topmost"  # 矛盾解消
-        assert template["coords_corrections"]["amount"] == amount_coords
-
-        # 履歴は date のままの旧座標を保存している（既存 insert_template_history 動作）
-        conn = get_db_connection(temp_db)
-        try:
-            row = conn.execute("SELECT coord_basis FROM templates WHERE id = ?", (template["id"],)).fetchone()
-            assert row["coord_basis"] == "topmost"
-        finally:
-            conn.close()
+        assert template["coord_basis"] == "date"  # 基底は変えない
+        assert "amount" not in template["coords_corrections"]  # 座標を書き込まない
 
 
 class TestCorrectionFeedbackEndToEnd:

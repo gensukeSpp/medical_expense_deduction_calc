@@ -494,8 +494,8 @@ def test_admin_db_not_configured(tmp_path):
         assert c.post("/admin/templates/x/basis", json={"basis": "date"}).status_code == 503
 
 
-def test_admin_shows_topmost_after_correction_on_date_template(temp_db, tmp_path):
-    """Issue #51: date テンプレを Web 修正すると管理画面の coord_basis が topmost 表示になる"""
+def test_admin_keeps_date_basis_after_correction_on_date_template(temp_db, tmp_path):
+    """Issue #51(案ii): date テンプレを Web 修正しても coord_basis は date のまま（anchor 未解決なら座標は書かない）"""
     import uuid
     from app.db import get_latest_template_by_clinic, upsert_template
 
@@ -513,6 +513,7 @@ def test_admin_shows_topmost_after_correction_on_date_template(temp_db, tmp_path
     )
 
     # raw + structured を作成して Web 修正を走らせる
+    # （raw に日付エントリが無い → date anchor 未解決 → 座標を書き込まず基底も date のまま）
     out_dir = tmp_path / "output_json"
     out_dir.mkdir()
     raw_data = [
@@ -524,13 +525,16 @@ def test_admin_shows_topmost_after_correction_on_date_template(temp_db, tmp_path
         {"name": "山田 太郎", "clinic": "あおばクリニック", "amount": 3800, "date": "2026-01-15"},
     )
 
+    before = get_latest_template_by_clinic(temp_db, clinic_id)
+    before_coords = dict((before or {}).get("coords_corrections") or {})
+
     app = create_app(output_dir=str(out_dir), db_path=str(temp_db))
     with TestClient(app) as c:
         resp = c.put("/receipt-001", json={"amount": "3,800"})
         assert resp.status_code == 200
         resp_admin = c.get("/admin/templates")
         assert resp_admin.status_code == 200
-        assert "topmost" in resp_admin.text
 
     template = get_latest_template_by_clinic(temp_db, clinic_id)
-    assert (template or {}).get("coord_basis") == "topmost"
+    assert (template or {}).get("coord_basis") == "date"  # 基底は date のまま（topmost へ戻さない）
+    assert (template or {}).get("coords_corrections") == before_coords  # anchor 未解決のため座標は書かない

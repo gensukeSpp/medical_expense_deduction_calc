@@ -94,14 +94,14 @@ def upsert_template(
 
 ---
 
-## Task 2: `process_correction_feedback()` で coord_basis を topmost に戻す
+## Task 2: `process_correction_feedback()` で date テンプレの修正座標を date 基準へ変換して維持
 
 **優先度: 高** — 矛盾解消の核。
 
 ### 変更内容
 
-`app/template_feedback.py::process_correction_feedback()` で、既存テンプレの `coord_basis` を読み、
-`date` なら `topmost` に戻して `upsert_template` へ渡す。
+`app/template_feedback.py::process_correction_feedback()` で、既存テンプレの `coord_basis` が `date` なら、
+修正座標を date 基準へ変換し `coord_basis` を `date` のまま維持する（topmost へ戻さない）。
 
 現行 62-85行の `existing` 取得〜`upsert_template` 呼び出し部分を修正:
 
@@ -117,15 +117,23 @@ def upsert_template(
         template_id = str(uuid.uuid4())
         new_version = 1
 
-    # 修正座標はレシート ocr_json（topmost 基準）由来。既存 basis が 'date' なら
-    # 整合のため 'topmost' へ戻す（Issue #51）。
-    existing_basis = (existing or {}).get("coord_basis")
-    coord_basis = "topmost" if existing_basis == "date" else existing_basis
-
     # Update only the fields that have coordinates
     updated_coords = dict(current_coords)
-    for field_name in updated_fields:
-        updated_coords[field_name] = field_coords_map[field_name]
+    existing_basis = (existing or {}).get("coord_basis")
+
+    if existing_basis == "date":
+        # Issue #51(案ii): date 基準テンプレは修正座標を date 基準へ変換し coord_basis を date 維持
+        shifted = _shift_correction_to_date_basis(db_path, receipt_id, field_coords_map)
+        if shifted is None:
+            # anchor 未解決 → 座標を書き込まず基底も変えない（安全側）
+            return {"updated_fields": [], "not_found_fields": not_found_fields, "history_id": None}
+        for field_name in updated_fields:
+            updated_coords[field_name] = shifted[field_name]
+        coord_basis = "date"
+    else:
+        for field_name in updated_fields:
+            updated_coords[field_name] = field_coords_map[field_name]
+        coord_basis = existing_basis
 
     # Upsert the template first to ensure the row exists for FK constraint
     upsert_template(
@@ -139,65 +147,49 @@ def upsert_template(
 ```
 
 ### 注意点
-- `existing_basis==None`（新規作成）と `existing_basis=='topmost'` はどちらも `coord_basis=None` → `upsert_template` 既定に委ねる（破壊なし）。
-- `existing_basis=='date'` のみ `'topmost'` を明示設定 → 矛盾解消。
+- `_shift_correction_to_date_basis()` は修正レシート `ocr_json` から**一意な** date box を特定し、その top-left で
+  修正座標を減算（`coord_normalizer.shift_template_coords`）。ocr_json が date 基準なら date box は原点で no-op、
+  topmost 基準なら date へ変換（両基準を一括処理）。
+- `existing_basis==None`（新規）と `'topmost'` は従来どおり（`coord_basis` は既定/不変）。
+- anchor 未解決（receipt 無し / ocr_json 無し / date 候補 0・複数）は座標を書かず基底も変えない（安全側）。
 - これ以外の変更ロジック（updated_fields / 履歴）は不変。
 
 **変更ファイル**: `app/template_feedback.py`
 
 ---
 
-## Task 3: フィードバック単体テスト（coord_basis リセット）
+## Task 3: フィードバック単体テスト（date 基準へ変換して維持）
 
-**優先度: 高** — 受入条件1の検証。
+**優先度: 高** — 受入条件1・4の検証。
 
 ### 変更内容
 
-`tests/test_feedback.py::TestProcessCorrectionFeedback` に、date → topmost リセットのテストを追加。
+`tests/test_feedback.py::TestProcessCorrectionFeedback` に、date テンプレ修正で座標を date 基準へ変換し
+`coord_basis` を `date` 維持するテスト／date 基準 ocr_json での no-op／anchor 未解決フォールバックを追加。
 
 ```python
-    def test_resets_coord_basis_to_topmost_after_correction_on_date_template(
-        self, temp_db, seed_clinic_and_receipt
-    ):
-        """Issue #51: coord_basis='date' のテンプレに topmost 基準で修正すると topmost に戻る"""
-        clinic_id = seed_clinic_and_receipt["clinic_id"]
+# 主テスト: topmost 修正を date 基準へ変換し coord_basis は date 維持
+def test_keeps_date_basis_and_converts_correction_on_date_template(self, temp_db, seed_clinic_and_receipt):
+    """Issue #51(案ii): date テンプレでは修正座標を date へ変換し coord_basis を date 維持"""
+    clinic_id = seed_clinic_and_receipt["clinic_id"]
+    receipt_id = seed_clinic_and_receipt["receipt_id"]
+    upsert_template(temp_db, str(uuid.uuid4()), clinic_id, version=2,
+                    coords_corrections={"date": [[0, 0], [150, 0], [150, 30], [0, 30]]},
+                    coord_basis="date")
+    amount_coords = [[400, 300], [480, 300], [480, 340], [400, 340]]
+    result = process_correction_feedback(temp_db, clinic_id, {"amount": amount_coords}, receipt_id=receipt_id)
+    assert result["updated_fields"] == ["amount"]
+    template = get_latest_template_by_clinic(temp_db, clinic_id)
+    assert template["coord_basis"] == "date"
+    assert template["coords_corrections"]["amount"] == [[350, 250], [430, 250], [430, 290], [350, 290]]
 
-        # date box を学習した上で coord_basis='date' の状態を作る
-        date_coords = {"date": [[50, 50], [200, 50], [200, 80], [50, 80]]}
-        template_id = str(uuid.uuid4())
-        upsert_template(
-            temp_db, template_id, clinic_id, version=2,
-            coords_corrections=date_coords, coord_basis="date",
-        )
-
-        # 修正で topmost 基準の座標を書き込む（既存フィールドとは別の amount）
-        amount_coords = [[400, 300], [480, 300], [480, 340], [400, 340]]
-        result = process_correction_feedback(
-            temp_db, clinic_id, {"amount": amount_coords}, receipt_id=None,
-        )
-        assert result["updated_fields"] == ["amount"]
-
-        template = get_latest_template_by_clinic(temp_db, clinic_id)
-        assert template is not None
-        assert template["coord_basis"] == "topmost"  # 矛盾解消
-        assert template["coords_corrections"]["amount"] == amount_coords
-
-        # 履歴は date のままの旧座標を保存している（既存 insert_template_history 動作）
-        conn = get_db_connection(temp_db)
-        try:
-            row = conn.execute(
-                "SELECT coord_basis FROM templates WHERE id = ?", (template["id"],)
-            ).fetchone()
-            assert row["coord_basis"] == "topmost"
-        finally:
-            conn.close()
+# 併せて: test_date_basis_correction_noop_on_date_basis_ocr（no-op 確認）/
+# test_skips_feedback_when_date_anchor_unresolvable（anchor 未解決で書込まず基底不変）
 ```
 
 ### 実行・確認
 
-- 追加前に `uv run pytest tests/test_feedback.py -k reset_coord_basis -v`
-  → FAIL（coord_basis がまだ date のまま）
-- Task 1・2 実装後に同コマンド → PASS
+- `uv run pytest tests/test_feedback.py -k keeps_date_basis -v` / `-k date_basis_correction_noop -v` / `-k skips_feedback_when_date_anchor -v` → PASS
 
 **変更ファイル**: `tests/test_feedback.py`
 
@@ -209,47 +201,33 @@ def upsert_template(
 
 ### 変更内容
 
-`tests/test_web.py` に、`coord_basis='date'` テンプレのレシートを Web フォーム修正すると
-管理画面の表示が `topmost` に変わることを `TestClient` 経由で検証するテストを追加。
+`tests/test_web.py` に、`coord_basis='date'` テンプレのレシートを Web フォーム修正しても
+管理画面の表示が `date` のまま変わることを `TestClient` 経由で検証するテストを改訂（`test_admin_keeps_date_basis_after_correction_on_date_template`）。
 
 ```python
-def test_admin_shows_topmost_after_correction_on_date_template(client, temp_db, tmp_path):
-    """Issue #51: date テンプレを Web 修正すると管理画面の coord_basis が topmost 表示になる"""
-    import json
-    from app.db import get_db_connection, get_latest_template_by_clinic, upsert_template
-    from app.output import write_json_atomic
-
-    # clinic を作る（_seed_template_clinic 相当のヘルパーを再利用）
-    clinic_id = _seed_template_clinic(temp_db)
-
-    # coord_basis='date' のテンプレにする
+def test_admin_keeps_date_basis_after_correction_on_date_template(temp_db, tmp_path):
+    """Issue #51(案ii): date テンプレを Web 修正しても管理画面の coord_basis は date 表示のまま"""
+    clinic_id = _seed_template_clinic(temp_db, "あおばクリニック")
     upsert_template(
         temp_db, str(uuid.uuid4()), clinic_id, version=2,
-        coords_corrections={"date": [[0, 0], [357, 4], [357, 35], [0, 31]]},
+        coords_corrections={"amount": [[443, 300], [523, 300], [523, 340], [443, 340]]},
         coord_basis="date",
     )
-
-    # raw + structured を作成して Web 修正を走らせる
-    out_dir = tmp_path / "output_json"
-    out_dir.mkdir()
-    raw_data = [
-        {"text": "3,800", "confidence": 0.9, "box": [[400, 300], [480, 300], [480, 340], [400, 340]]},
-    ]
-    write_json_atomic(out_dir / "receipt-001-raw_data.json", raw_data)
-    write_json_atomic(
-        out_dir / "receipt-001-structured_data.json",
-        {"name": "山田 太郎", "clinic": "あおばクリニック", "amount": 3800, "date": "2026-01-15"},
-    )
-
+    # raw に日付エントリが無い → anchor 未解決 → 座標を書かず基底も date のまま
+    out_dir = tmp_path / "output_json"; out_dir.mkdir()
+    write_json_atomic(out_dir / "receipt-001-raw_data.json",
+                      [{"text": "3,800", "confidence": 0.9, "box": [[400, 300], [480, 300], [480, 340], [400, 340]]}])
+    write_json_atomic(out_dir / "receipt-001-structured_data.json",
+                      {"name": "山田 太郎", "clinic": "あおばクリニック", "amount": 3800, "date": "2026-01-15"})
+    before = get_latest_template_by_clinic(temp_db, clinic_id)
+    before_coords = dict((before or {}).get("coords_corrections") or {})
     app = create_app(output_dir=str(out_dir), db_path=str(temp_db))
     with TestClient(app) as c:
-        resp = c.put("/receipt-001", json={"amount": "3,800"})
-        assert resp.status_code == 200
-        resp_admin = c.get("/admin/templates")
-        assert "topmost" in resp_admin.text
-
+        assert c.put("/receipt-001", json={"amount": "3,800"}).status_code == 200
+        assert c.get("/admin/templates").status_code == 200
     template = get_latest_template_by_clinic(temp_db, clinic_id)
-    assert (template or {}).get("coord_basis") == "topmost"
+    assert (template or {}).get("coord_basis") == "date"
+    assert (template or {}).get("coords_corrections") == before_coords
 ```
 
 ※ `_seed_template_clinic` は既存ヘルパー（test_web.py 上に定義）。clinic 名は「あおばクリニック」に合わせて調整する。
@@ -257,7 +235,7 @@ def test_admin_shows_topmost_after_correction_on_date_template(client, temp_db, 
 
 ### 実行・確認
 
-- `uv run pytest tests/test_web.py -k admin_shows_topmost -v` → PASS（Task 1・2 実装後）
+- `uv run pytest tests/test_web.py -k keeps_date_basis -v` → PASS
 
 **変更ファイル**: `tests/test_web.py`
 
@@ -285,7 +263,7 @@ def test_admin_shows_topmost_after_correction_on_date_template(client, temp_db, 
 3. コミット（ユーザー確認後に分割コミット可）:
    ```bash
    git add app/db.py app/template_feedback.py tests/test_feedback.py tests/test_web.py
-   git commit -m "fix #51: coord_basis の整合（修正時 topmost へ戻す）"
+   git commit -m "fix #51: coord_basis の整合（修正時も date 基準へ揃える）"
    ```
 
 **注意**: コミットはユーザー確認後に実施する（自動コミットしない方針）。DB コピー等への影響なし・レシート再登録なし。
@@ -297,6 +275,6 @@ def test_admin_shows_topmost_after_correction_on_date_template(client, temp_db, 
 | ファイル | Task | 変更種別 | 変更規模 |
 |---------|------|---------|---------|
 | `app/db.py` | 1 | 修正（`upsert_template` 拡張） | ~15行 |
-| `app/template_feedback.py` | 2 | 修正（coord_basis リセット） | ~5行 |
+| `app/template_feedback.py` | 2 | 修正（date 基準へ変換 + フォールバック） | ~40行 |
 | `tests/test_feedback.py` | 3 | 修正（テスト追加） | ~40行 |
 | `tests/test_web.py` | 4 | 修正（テスト追加） | ~30行 |
