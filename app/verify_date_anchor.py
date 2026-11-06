@@ -279,6 +279,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not res["ok"]:
         print(f"\n[段階2] {res['reason']}")
         return EXIT_UNRESOLVED
+    if res.get("mode") == "force":
+        # force 分岐 (Issue #50): 再正規化なしで coords_corrections による強制抽出を報告する
+        print("\n[段階2] anchor 解決をスキップ（force モード）")
+        print("\n[強制抽出] coords_corrections による近傍抽出結果")
+        for k, v in report["force_extraction"].items():
+            print(f"  {k}: {v!r}")
+        print("\n[確認] 元の raw / DB / structured は不変更。レシートは追加されていません。")
+        print(f"作業コピー: {report['workdir']}")
+        return EXIT_OK
     print(f"\n[段階2] 採用候補 box={res['anchor_box']}")
 
     ren = report["renormalization"]

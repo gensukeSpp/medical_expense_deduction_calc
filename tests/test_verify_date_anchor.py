@@ -259,6 +259,44 @@ def test_verify_force_extracts_when_anchor_none(tmp_path: Path):
     assert "renormalization" not in report
 
 
+def test_main_force_mode_prints_force_extraction(tmp_path: Path, capsys):
+    """--force 実行時、main() は KeyError にならず force 抽出結果を表示する (Issue #50)."""
+    work = tmp_path / "verify"
+    _, template_coords, _ = _date_basis_geometry()
+    raw = tmp_path / "raw_data.json"
+    _write_json(
+        raw,
+        [
+            {"text": "なの花薬局", "box": template_coords["name"]},
+            {"text": "1450", "box": template_coords["amount"]},
+        ],
+    )
+    structured = tmp_path / "structured_data.json"
+    _write_json(structured, {"clinic": "なの花薬局", "date": "2026-09-02"})
+    db = tmp_path / "db.sqlite3"
+    _seed_date_basis_template(db, "なの花薬局", template_coords)
+
+    exit_code = main(
+        [
+            "--raw",
+            str(raw),
+            "--structured",
+            str(structured),
+            "--db",
+            str(db),
+            "--workdir",
+            str(work),
+            "--force",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == EXIT_OK
+    assert "強制抽出" in output
+    assert "なの花薬局" in output
+    assert "1450" in output
+
+
 def test_default_workdir_is_cleaned_on_return_and_exception(tmp_path: Path, monkeypatch):
     import app.verify_date_anchor as verify_module
 
