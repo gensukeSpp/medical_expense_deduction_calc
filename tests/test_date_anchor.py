@@ -11,6 +11,7 @@ from app.date_anchor import (
     find_date_candidates,
     resolve_date_anchor,
     apply_date_anchor_normalization,
+    apply_date_basis_force,
     _to_ocr_entries,
 )
 
@@ -499,3 +500,186 @@ class TestApplyDateAnchorNormalization:
         assert out.exists()
         written = json.loads(out.read_text(encoding="utf-8"))
         assert written["name"] not in (None, "")
+
+
+# ------------------------------------------------------------------
+# apply_date_basis_force (Issue #50)
+# ------------------------------------------------------------------
+
+
+class TestApplyDateBasisForce:
+    @pytest.fixture
+    def temp_db(self, tmp_path: Path) -> Path:
+        from app.db_migrations import run_migrations
+
+        db_file = tmp_path / "test_db.sqlite3"
+        run_migrations(db_file, "docs/schema.sql")
+        return db_file
+
+    def test_updates_structured_on_date_basis_template(self, tmp_path: Path, temp_db: Path):
+        """coord_basis='date' 且つ clinic 抽出成功なら name/amount を近傍抽出して structured を更新する."""
+        import uuid
+
+        from app.db import upsert_clinic, upsert_template
+        from app.output import write_json_atomic
+
+        clinic_id = str(uuid.uuid4())
+        upsert_clinic(temp_db, clinic_id, "あおばクリニック")
+        # date 基準 template（date box が原点）
+        upsert_template(
+            temp_db,
+            str(uuid.uuid4()),
+            clinic_id,
+            version=1,
+            coords_corrections={
+                "date": [[0, 0], [150, 0], [150, 30], [0, 30]],
+                "name": [[50, 100], [200, 100], [200, 140], [50, 140]],
+                "amount": [[400, 300], [480, 300], [480, 340], [400, 340]],
+            },
+            coord_basis="date",
+        )
+
+        raw_path = tmp_path / "raw_data.json"
+        write_json_atomic(
+            raw_path,
+            [
+                {"text": "山田 太郎", "confidence": 0.95, "box": [[50, 100], [200, 100], [200, 140], [50, 140]]},
+                {
+                    "text": "あおばクリニック",
+                    "confidence": 0.92,
+                    "box": [[50, 160], [300, 160], [300, 200], [50, 200]],
+                },
+                {"text": "3,800", "confidence": 0.88, "box": [[400, 300], [480, 300], [480, 340], [400, 340]]},
+            ],
+        )
+
+        structured = {"name": "山田 太郎", "clinic": "あおばクリニック", "amount": 3800, "date": "2026-01-15"}
+        result = apply_date_basis_force(raw_path, structured, temp_db)
+
+        assert result is not None
+        assert structured["name"] == "山田 太郎"
+        assert structured["amount"] == "3,800"  # 近傍抽出で上書き可能
+
+    def test_skips_unless_date_basis_and_clinic(self, tmp_path: Path, temp_db: Path):
+        """coord_basis!='date' または clinic 空なら force しない（受入要件3）."""
+        import uuid
+
+        from app.db import upsert_clinic, upsert_template
+        from app.output import write_json_atomic
+
+        clinic_id = str(uuid.uuid4())
+        upsert_clinic(temp_db, clinic_id, "あおばクリニック")
+        upsert_template(
+            temp_db,
+            str(uuid.uuid4()),
+            clinic_id,
+            version=1,
+            coords_corrections={"date": [[0, 0], [150, 0], [150, 30], [0, 30]]},
+            coord_basis="topmost",  # topmost のまま
+        )
+
+        raw_path = tmp_path / "raw_data.json"
+        write_json_atomic(
+            raw_path,
+            [{"text": "3,800", "confidence": 0.9, "box": [[400, 300], [480, 300], [480, 340], [400, 340]]}],
+        )
+
+        # topmost template → force しない
+        assert apply_date_basis_force(raw_path, {"clinic": "あおばクリニック", "amount": 3800}, temp_db) is None
+        # clinic 空 → force しない
+        assert apply_date_basis_force(raw_path, {"clinic": "", "amount": 3800}, temp_db) is None
+        # db 未指定 → force しない
+        assert apply_date_basis_force(raw_path, {"clinic": "あおばクリニック", "amount": 3800}, None) is None
+
+    def test_skips_when_date_unlearned(self, tmp_path: Path, temp_db: Path):
+        """date 未学習（coords_corrections['date'] なし）の date 基準 template は force 対象外（受入要件3）."""
+        import uuid
+
+        from app.db import upsert_clinic, upsert_template
+        from app.output import write_json_atomic
+
+        clinic_id = str(uuid.uuid4())
+        upsert_clinic(temp_db, clinic_id, "あおばクリニック")
+        upsert_template(
+            temp_db,
+            str(uuid.uuid4()),
+            clinic_id,
+            version=1,
+            coords_corrections={"name": [[50, 100], [200, 100], [200, 140], [50, 140]]},
+            coord_basis="date",
+        )
+
+        raw_path = tmp_path / "raw_data.json"
+        write_json_atomic(
+            raw_path,
+            [{"text": "山田 太郎", "confidence": 0.95, "box": [[50, 100], [200, 100], [200, 140], [50, 140]]}],
+        )
+
+        structured = {"clinic": "あおばクリニック", "name": None}
+        assert apply_date_basis_force(raw_path, structured, temp_db) is None
+        assert structured["name"] is None  # 変更されない
+
+    def test_writes_structured_json_and_updates_db_ocr_json(self, tmp_path: Path, temp_db: Path):
+        """output_dir 指定時 structured_data.json を書き直し、DB ocr_json を同期する（受入要件4）."""
+        import uuid
+
+        from app.db import (
+            upsert_clinic,
+            upsert_template,
+            insert_receipt,
+            get_db_connection,
+        )
+        from app.output import write_json_atomic
+
+        clinic_id = str(uuid.uuid4())
+        upsert_clinic(temp_db, clinic_id, "あおばクリニック")
+        coords = {
+            "date": [[0, 0], [150, 0], [150, 30], [0, 30]],
+            "name": [[50, 100], [200, 100], [200, 140], [50, 140]],
+        }
+        upsert_template(
+            temp_db,
+            str(uuid.uuid4()),
+            clinic_id,
+            version=1,
+            coords_corrections=coords,
+            coord_basis="date",
+        )
+
+        raw_path = tmp_path / "a_1-raw_data.json"
+        entries = [
+            {"text": "山田 太郎", "confidence": 0.95, "box": [[50, 100], [200, 100], [200, 140], [50, 140]]},
+            {"text": "あおばクリニック", "confidence": 0.92, "box": [[50, 160], [300, 160], [300, 200], [50, 200]]},
+        ]
+        write_json_atomic(raw_path, entries)
+
+        receipt_id = str(uuid.uuid4())
+        insert_receipt(
+            temp_db,
+            receipt_id,
+            str(raw_path),
+            [{"text": "old", "box": []}],
+            {"clinic": "あおばクリニック", "name": None},
+            clinic_id,
+        )
+
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+        structured = {"clinic": "あおばクリニック", "name": None}
+        result = apply_date_basis_force(raw_path, structured, temp_db, output_dir=output_dir)
+
+        assert result is not None
+        assert structured["name"] == "山田 太郎"
+        out = output_dir / "a_1-structured_data.json"
+        assert out.exists()
+        written = json.loads(out.read_text(encoding="utf-8"))
+        assert written["name"] == "山田 太郎"
+
+        # DB の ocr_json が同期されている
+        conn = get_db_connection(temp_db)
+        try:
+            row = conn.execute("SELECT ocr_json FROM receipts WHERE id=?", (receipt_id,)).fetchone()
+            stored = json.loads(row["ocr_json"])
+        finally:
+            conn.close()
+        assert stored[0]["text"] == "山田 太郎"

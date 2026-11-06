@@ -361,6 +361,87 @@ def apply_date_anchor_normalization(
     return (offset_x, offset_y)
 
 
+def apply_date_basis_force(
+    raw_path: Path,
+    structured: Dict[str, Any],
+    db_path: Optional[str | Path],
+    proximity_threshold: float = 50.0,
+    output_dir: Optional[Path | str] = None,
+) -> Optional[tuple[int, int]]:
+    """Force date-basis coordinate extraction without resolving the date anchor (Issue #50).
+
+    When ``apply_date_anchor_normalization()`` cannot resolve the date anchor
+    (e.g. zero date candidates), this fallback applies the clinic's date-basis
+    template ``coords_corrections`` directly with ``search_fields_by_proximity``
+    to extract name / amount from the raw OCR boxes.
+
+    Gate (Issue #50 acceptance 3): runs only when
+    - ``db_path`` is provided,
+    - ``structured['clinic']`` is non-empty (clinic name extracted),
+    - the latest template has ``coord_basis == 'date'``,
+    - and ``coords_corrections['date']`` is learned.
+
+    No re-normalization happens; the raw stays in its original basis. The
+    structured dict is updated in place and, when ``output_dir`` is given,
+    ``*-structured_data.json`` is rewritten via OutputWriter. The DB receipt's
+    stored ocr_json is synced via ``update_receipt_ocr_json_by_source`` (no
+    insert — no duplicate receipts).
+
+    Returns (0, 0) when values changed, or None when the gate / extraction
+    did not apply anything.
+    """
+    raw_path = Path(raw_path)
+
+    if not db_path:
+        return None
+    clinic_name = (structured.get("clinic") or "").strip()
+    if not clinic_name:
+        return None
+
+    from app.db import get_latest_template_by_clinic, get_or_create_clinic
+
+    clinic_id = get_or_create_clinic(db_path, clinic_name)
+    template = get_latest_template_by_clinic(db_path, clinic_id)
+    if not template:
+        return None
+    if (template.get("coord_basis") or "topmost") != "date":
+        return None
+    coords = template.get("coords_corrections") or {}
+    if coords.get("date") is None:
+        return None  # date 未学習 → force 対象外（#40 ガードと整合）
+
+    from app.coord_search import search_fields_by_proximity
+    from app.structural_parser import DEFAULT_PROXIMITY_THRESHOLD
+    from app.input import read_json
+
+    entries = _to_ocr_entries(read_json(raw_path))
+    if not entries:
+        return None
+
+    if proximity_threshold == 50.0:
+        proximity_threshold = DEFAULT_PROXIMITY_THRESHOLD
+    proximity = search_fields_by_proximity(entries, coords, threshold=proximity_threshold)
+    changed = False
+    for field_name, text in proximity.items():
+        if field_name == "date":
+            continue
+        if text and structured.get(field_name) != text:
+            structured[field_name] = text
+            changed = True
+    if not changed:
+        return None
+
+    if output_dir is not None:
+        from app.structural_parser import OutputWriter
+
+        OutputWriter().write(Path(output_dir), raw_path, structured)
+
+    from app.db import update_receipt_ocr_json_by_source
+
+    update_receipt_ocr_json_by_source(db_path, str(raw_path), entries)
+    return (0, 0)
+
+
 def _apply_coordinate_extraction(
     output_dir: Path | str,
     raw_path: Path,
