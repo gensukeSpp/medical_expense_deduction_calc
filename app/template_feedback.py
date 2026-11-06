@@ -75,6 +75,11 @@ def process_correction_feedback(
     for field_name in updated_fields:
         updated_coords[field_name] = field_coords_map[field_name]
 
+    # 修正座標はレシート ocr_json（topmost 基準）由来。既存 basis が 'date' なら
+    # 整合のため 'topmost' へ戻す（Issue #51）。
+    existing_basis = (existing or {}).get("coord_basis")
+    coord_basis = "topmost" if existing_basis == "date" else existing_basis
+
     # Upsert the template first to ensure the row exists for FK constraint
     upsert_template(
         db_path=db_path,
@@ -82,6 +87,7 @@ def process_correction_feedback(
         clinic_id=clinic_id,
         version=new_version,
         coords_corrections=updated_coords,
+        coord_basis=coord_basis,
     )
 
     # Save history snapshot after template upsert (FK safety)
