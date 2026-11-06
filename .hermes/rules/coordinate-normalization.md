@@ -186,6 +186,27 @@ date 基準なら修正フィールド自体も topmost とは限らない」と
 - **対象外**: date → topmost の管理画面トグル UI / 逆変換基盤（本 Issue では不要）。
 - 詳細は `specs/2026-11-06-1-spec.md`（Issue #51）。
 
+## 強制 date 基準補正（Issue #50）
+
+date 基準テンプレートでも、raw 内に構造化 date と一致する日付 box が無い（date 候補 0 件）等で
+`resolve_date_anchor()` が `None` を返すと、従来は date 基準補正・座標抽出が一切走らなかった。
+これを補完するため `date_anchor.apply_date_basis_force()` を追加:
+
+- **ゲート（受入要件3）**: `db_path` あり **かつ** `structured.clinic` 非空 **かつ**
+  最新 template の `coord_basis == 'date'` **かつ** `coords_corrections['date']` 学習済み。
+  date 未学習 template は対象外（#40 ガードと整合）。
+- **発動タイミング**: `apply_date_anchor_normalization()` が `None` のときのみ（補完）。
+  low_confidence 時と anchor 確定時は発動しない（二重補正防止）。
+- **動作**: 再正規化は**行わない**（raw は元の基準のまま）。template の `coords_corrections` に
+  `search_fields_by_proximity` を直接適用し、date 以外のフィールド（name / amount 等）を
+  近傍抽出して `structured` へ上書き（変化時のみ）。`OutputWriter` で
+  `*-structured_data.json` を書き直し、`update_receipt_ocr_json_by_source` で DB の
+  ocr_json を同期する（`insert_receipt` は呼ばない・二重登録なし）。
+- **検証ツール**: `app/verify_date_anchor.py` に `--force` / `verify_date_anchor(force=True)` を追加。
+  anchor 解決不能時でも `report["resolution"]["mode"] == "force"` と `report["force_extraction"]`
+  に近傍抽出結果を報告する（元ファイル・DB は不変更のまま）。
+- 詳細は `specs/2026-11-06-spec.md`（Issue #50）。
+
 ## 実装場所
 
 - 候補照合・anchor 解決・適用: `app/date_anchor.py`
