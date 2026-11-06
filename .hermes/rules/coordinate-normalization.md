@@ -98,7 +98,9 @@ min-x / min-y を原点**に全 box をシフトする。**自動遷移（`date_
   既に date なら False＝二重変換ガード内蔵）。**新規 SQL を書かない**。
 - 移行は **template のみ**変更。既存 receipt / `receipts.ocr_json` の再正規化は行わない（切替後に画像を再投入して
   date 基準の補正を確認する運用）。
-- date → topmost の逆方向切替は対象外（一方向のみ）。曖昧性判定の緩和も後続 Issue。
+- date → topmost の逆方向切替は**管理画面トグルでは対象外**（一方向のみ）。曖昧性判定の緩和も後続 Issue。
+- ※ ただし**Web フォーム修正時は例外**: 修正で topmost 基準座標を書き込むため `coord_basis` を `topmost` へ
+  戻す（Issue #51、後述）。管理画面トグルの一方向性はそのまま。
 
 ### 手動切替後の date 基準補正を実際に走らせる（[中-1] 対応）
 
@@ -155,8 +157,24 @@ min-x / min-y を原点**に全 box をシフトする。**自動遷移（`date_
 | `raw_data.json` | date 基準（anchor 確定時） | `normalize_coordinates_by_anchor` で上書き |
 | `receipts.ocr_json`（DB） | date 基準 | `update_receipt_ocr_json_by_source` で更新 |
 | `structured_data.json` | date 基準補正適用時は座標抽出値を反映可 | `output_dir` 指定時のみ上書き |
-| `templates.coords_corrections` | date 基準（切替済み） | `coord_basis` で識別 |
+| `templates.coords_corrections` | date 基準（切替済み）→ **Web 修正後は topmost** | 切替は `coord_basis` で識別。Web 修正で topmost へ戻る（#51） |
 | OCR 未学習 clinic / `--input-json` | topmost 基準（従来） | anchor 解決しない |
+
+## Web フォーム修正時の coord_basis リセット（Issue #51）
+
+Web 管理画面トグルで `coord_basis='date'` にした後、同クリニックのレシートを Web フォームで修正すると、
+`templates.coords_corrections` が topmost 基準座標で上書きされるのに `coord_basis` が `date` のまま残る
+**基底不一致**が生じる。これを解消するため、Web 修正経路では既存 basis が `date` なら `topmost` へ戻す。
+
+- **経路**: `ReceiptUpdater.update_receipt()` → `OCRCoordinateService.process_feedback()`
+  → `template_feedback.process_correction_feedback()`。
+- **判定**: `existing_basis = (existing or {}).get("coord_basis")`。`'date'` のみ `'topmost'` に上書き。
+  `None`（新規）と `'topmost'` は変化しない。
+- **DB 対応**: `db.upsert_template()` に任意引数 `coord_basis` を追加。非 None 時のみ INSERT/UPDATE 両方で
+  `coord_basis` 列を設定。None なら列不変（後方互換）。
+- **管理画面**: 変更不要。DB 値が `topmost` に戻れば `GET /admin/templates` も `topmost` 表示になる。
+- **対象外**: date → topmost の管理画面トグル UI（#51 は修正時のみの実質解除）。date 基準のままの修正は #50。
+- 詳細は `specs/2026-11-06-1-spec.md`（Issue #51）。
 
 ## 実装場所
 
