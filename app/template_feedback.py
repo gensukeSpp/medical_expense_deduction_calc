@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -13,6 +14,8 @@ from app.db import (
     insert_template_history,
     upsert_template,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def process_correction_feedback(
@@ -72,8 +75,37 @@ def process_correction_feedback(
 
     # Update only the fields that have coordinates
     updated_coords = dict(current_coords)
-    for field_name in updated_fields:
-        updated_coords[field_name] = field_coords_map[field_name]
+    existing_basis = (existing or {}).get("coord_basis")
+
+    if existing_basis == "date":
+        # Issue #51: date 基準テンプレートでは、修正座標を date 基準へ変換して
+        # coord_basis を date のまま維持する（topmost へ戻さない。座標全体と基底を一致させる）。
+        # 修正座標の基準は修正レシート ocr_json の基準と同じ。date box top-left で減算すれば
+        #   - ocr_json が date 基準（anchor 実行済み）: date box は原点 → シフトは no-op
+        #   - ocr_json が topmost 基準: date box の絶対位置で減算 → date 基準へ変換
+        # の 2 ケースを一括処理できる。
+        shifted = _shift_correction_to_date_basis(db_path, receipt_id, field_coords_map)
+        if shifted is None:
+            # 修正座標の基準を安全に判別できない（date anchor 未解決）ため、date テンプレート
+            # を破壊しないよう座標を書き込まない（基底も変更しない）。
+            logger.warning(
+                "Template for clinic %s is date-basis but date anchor is unresolvable "
+                "for receipt %s; skipping coordinate feedback",
+                clinic_id,
+                receipt_id,
+            )
+            return {
+                "updated_fields": [],
+                "not_found_fields": not_found_fields,
+                "history_id": None,
+            }
+        for field_name in updated_fields:
+            updated_coords[field_name] = shifted[field_name]
+        coord_basis = "date"
+    else:
+        for field_name in updated_fields:
+            updated_coords[field_name] = field_coords_map[field_name]
+        coord_basis = existing_basis
 
     # Upsert the template first to ensure the row exists for FK constraint
     upsert_template(
@@ -82,6 +114,7 @@ def process_correction_feedback(
         clinic_id=clinic_id,
         version=new_version,
         coords_corrections=updated_coords,
+        coord_basis=coord_basis,
     )
 
     # Save history snapshot after template upsert (FK safety)
@@ -104,3 +137,54 @@ def process_correction_feedback(
         "not_found_fields": not_found_fields,
         "history_id": history_id,
     }
+
+
+def _shift_correction_to_date_basis(
+    db_path: str | Path,
+    receipt_id: Optional[str],
+    field_coords_map: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Shift correction coordinates into date basis using the corrected receipt's date box.
+
+    Corrected coordinates derive from the corrected receipt's ocr_json, whose basis is
+    either 'topmost' (date anchor did not run) or 'date' (date-anchor re-normalization
+    rewrote it). Both cases are reconciled by subtracting the receipt's own date-box
+    top-left: for a topmost ocr_json this performs the topmost -> date shift, while for a
+    date-basis ocr_json the date box sits at the origin so the subtraction is a no-op.
+
+    Args:
+        db_path: Path to the SQLite database.
+        receipt_id: The corrected receipt's ID (needed to read its ocr_json).
+        field_coords_map: Mapping of the corrected field boxes (in the receipt's basis).
+
+    Returns:
+        The corrected boxes shifted to date basis, or None when the date anchor cannot be
+        resolved (receipt missing / no ocr_json / date text absent / zero or multiple
+        date candidates). The caller must not write boxes into a date-basis template
+        when this returns None.
+    """
+    if receipt_id is None:
+        return None
+
+    from app.coord_normalizer import shift_template_coords
+    from app.date_anchor import _top_left_box, find_date_candidates
+    from app.db import get_receipt
+
+    receipt = get_receipt(db_path, receipt_id)
+    ocr_json = (receipt or {}).get("ocr_json")
+    structured_date = ((receipt or {}).get("normalized_json") or {}).get("date")
+    if not ocr_json or not structured_date:
+        return None
+
+    candidates = find_date_candidates(ocr_json, structured_date)
+    if len(candidates) != 1:
+        return None
+
+    box = candidates[0].get("box")
+    if not isinstance(box, list):
+        return None
+    top_left = _top_left_box(box)
+    if top_left is None:
+        return None
+
+    return shift_template_coords(field_coords_map, top_left[0], top_left[1])

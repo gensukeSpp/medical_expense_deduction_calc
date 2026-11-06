@@ -1,0 +1,40 @@
+{
+  "servers": {
+    "filesystem": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "${workspaceFolder}"
+      ]
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest"
+      ]
+    },
+    "code-review-graph": {
+      "command": "uvx",
+      "args": [
+        "code-review-graph",
+        "serve"
+      ]
+    },
+    "better-code-review-graph": {
+      "command": "uvx",
+      "args": [
+        "--python",
+        "3.13",
+        "better-code-review-graph"
+      ],
+      "env": {
+        "MCP_TRANSPORT": "stdio"
+      },
+      "enabled": "true"
+    }
+  }
+}

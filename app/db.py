@@ -267,6 +267,7 @@ def upsert_template(
     clinic_id: str,
     version: int,
     coords_corrections: Dict[str, Any],
+    coord_basis: Optional[str] = None,
 ) -> None:
     """Upsert a template config for a clinic.
 
@@ -276,22 +277,44 @@ def upsert_template(
         clinic_id: Associated clinic ID.
         version: Version number.
         coords_corrections: Dictionary containing OCR corrections.
+        coord_basis: Optional coordinate basis ('topmost' / 'date').
+            When None, keeps existing behavior (default to schema default
+            'topmost' on insert; leaves the column unchanged on update).
     """
     coords_str = json.dumps(coords_corrections, ensure_ascii=False)
+
+    # coord_basis 指定時のみ UPDATE 句に含める（None なら従来どおり不変を維持）
+    if coord_basis is not None:
+        update_clause = """
+            clinic_id = excluded.clinic_id,
+            version = excluded.version,
+            coords_corrections = excluded.coords_corrections,
+            coord_basis = excluded.coord_basis
+        """
+        values_sql = "(id, clinic_id, version, coords_corrections, coord_basis)"
+        values_ph = "(?, ?, ?, ?, ?)"
+        params = (template_id, clinic_id, version, coords_str, coord_basis)
+    else:
+        update_clause = """
+            clinic_id = excluded.clinic_id,
+            version = excluded.version,
+            coords_corrections = excluded.coords_corrections
+        """
+        values_sql = "(id, clinic_id, version, coords_corrections)"
+        values_ph = "(?, ?, ?, ?)"
+        params = (template_id, clinic_id, version, coords_str)
+
+    sql = f"""
+        INSERT INTO templates {values_sql}
+        VALUES {values_ph}
+        ON CONFLICT(id) DO UPDATE SET
+            {update_clause}
+    """
+
     conn = get_db_connection(db_path)
     try:
         with conn:
-            conn.execute(
-                """
-                INSERT INTO templates (id, clinic_id, version, coords_corrections)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    clinic_id = excluded.clinic_id,
-                    version = excluded.version,
-                    coords_corrections = excluded.coords_corrections
-                """,
-                (template_id, clinic_id, version, coords_str),
-            )
+            conn.execute(sql, params)
     finally:
         conn.close()
 

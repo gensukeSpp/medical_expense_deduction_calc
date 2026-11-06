@@ -250,6 +250,9 @@ refactor #<issue>: <description>
   フラグ時はテンプレート学習スキップ、前処理 (CLAHE/二値化) で OCR 再試行。
 - **座標正規化の基準**: 既定 topmost/leftmost。date 学習済み clinic では date box 基準へ再正規化できる
   （`coord_basis` 列・二重変換ガード・前方補正の #40 ガード・手動切替 #42 を含む）。
+- **Web 修正時の coord_basis**: 既存 basis が `date` のテンプレを Web フォーム修正する際、修正座標を
+  date 基準へ変換し `coord_basis` は `date` のまま維持する（#51 案ii。topmost へは戻さない。anchor 未解決時は
+  座標を書かず基底も不変）。`upsert_template` の `coord_basis` 引数対応含む。詳細は `coordinate-normalization.md`。
 - **ファイル安定性チェック**: `is_file_stable()` が 0.5 秒間隔 × 3 回のサイズ比較で書込み完了を判定。
 
 詳細は以下を参照:
