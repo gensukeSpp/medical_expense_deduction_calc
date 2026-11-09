@@ -75,6 +75,7 @@ def verify_date_anchor(
     db_path: Optional[Path],
     threshold: float = DEFAULT_PROXIMITY_THRESHOLD,
     workdir: Optional[Path] = None,
+    force: bool = False,
 ) -> Dict[str, Any]:
     """Run and report each stage of date-anchor verification on working copies.
 
@@ -155,9 +156,19 @@ def verify_date_anchor(
             proximity_threshold=threshold,
         )
         if anchor is None:
-            report["resolution"] = {
-                "ok": False,
-                "reason": "date 候補が解決不能（同点/曖昧）。安全側フォールバックとして誤候補は採用しない",
+            if not force:
+                report["resolution"] = {
+                    "ok": False,
+                    "reason": "date 候補が解決不能（同点/曖昧）。安全側フォールバックとして誤候補は採用しない",
+                }
+                return report
+            # 強制分岐 (Issue #50): anchor 解決をスキップし coords_corrections で近傍抽出する
+            report["resolution"] = {"ok": True, "mode": "force", "anchor_box": None}
+            proximity = search_fields_by_proximity(entries, coords, threshold=threshold)
+            report["force_extraction"] = {k: v for k, v in proximity.items() if k != "date"}
+            report["reports_balance"] = {
+                "originals_untouched": True,
+                "receipts_not_inserted": True,
             }
             return report
         report["resolution"] = {"ok": True, "anchor_box": anchor}
@@ -222,6 +233,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         help=f"proximity 閾値 (px, default={DEFAULT_PROXIMITY_THRESHOLD})",
     )
     parser.add_argument("--workdir", default=None, help="作業領域（残したい場合。未指定は一時領域）")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="anchor 解決をスキップし coords_corrections で強制抽出する (Issue #50)",
+    )
     parser.add_argument("--report", default=None, help="任意で JSON 報告の出力先")
     args = parser.parse_args(argv)
 
@@ -232,6 +248,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             Path(args.db) if args.db else None,
             threshold=args.threshold,
             workdir=Path(args.workdir) if args.workdir else None,
+            force=args.force,
         )
     except FileNotFoundError as exc:
         print(f"PRECONDITION FAIL: {exc}")
@@ -262,6 +279,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not res["ok"]:
         print(f"\n[段階2] {res['reason']}")
         return EXIT_UNRESOLVED
+    if res.get("mode") == "force":
+        # force 分岐 (Issue #50): 再正規化なしで coords_corrections による強制抽出を報告する
+        print("\n[段階2] anchor 解決をスキップ（force モード）")
+        print("\n[強制抽出] coords_corrections による近傍抽出結果")
+        for k, v in report["force_extraction"].items():
+            print(f"  {k}: {v!r}")
+        print("\n[確認] 元の raw / DB / structured は不変更。レシートは追加されていません。")
+        print(f"作業コピー: {report['workdir']}")
+        return EXIT_OK
     print(f"\n[段階2] 採用候補 box={res['anchor_box']}")
 
     ren = report["renormalization"]

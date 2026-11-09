@@ -217,11 +217,17 @@ class ReceiptProcessor:
                 # ※ 構造化出力の値はテキスト抽出に由来し座標基準へ依存しないため、再解析は行わない。
                 if structured and self.db_path and not low_confidence:
                     try:
-                        from app.date_anchor import apply_date_anchor_normalization
+                        from app.date_anchor import ANCHOR_UNRESOLVED, apply_date_anchor_normalization
 
-                        apply_date_anchor_normalization(
+                        anchor_ok, anchor_detail = apply_date_anchor_normalization(
                             active_raw_path, structured, self.db_path, output_dir=output_dir
                         )
+                        if not anchor_ok and anchor_detail == ANCHOR_UNRESOLVED:
+                            # 日付候補 0 件等で anchor 解決不能な場合のみ補完
+                            # （Issue #50 受入要件3 / レビュー P2#1）
+                            from app.date_anchor import apply_date_basis_force
+
+                            apply_date_basis_force(active_raw_path, structured, self.db_path, output_dir=output_dir)
                     except Exception:
                         LOG.exception("Date-anchor normalization failed for %s", active_raw_path)
 

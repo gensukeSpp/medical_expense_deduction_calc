@@ -253,6 +253,9 @@ refactor #<issue>: <description>
 - **Web 修正時の coord_basis**: 既存 basis が `date` のテンプレを Web フォーム修正する際、修正座標を
   date 基準へ変換し `coord_basis` は `date` のまま維持する（#51 案ii。topmost へは戻さない。anchor 未解決時は
   座標を書かず基底も不変）。`upsert_template` の `coord_basis` 引数対応含む。詳細は `coordinate-normalization.md`。
+- **強制 date 基準補正**: anchor 解決不能（date 候補 0 件等）でも、`coord_basis==date` 且つクリニック名抽出成功
+  且つ date 学習済みなら template coords で近傍抽出を強制する（`apply_date_basis_force()`、両経路統合、
+  `--force` 検証ツール対応。Issue #50）。詳細は `coordinate-normalization.md`。
 - **ファイル安定性チェック**: `is_file_stable()` が 0.5 秒間隔 × 3 回のサイズ比較で書込み完了を判定。
 
 詳細は以下を参照:

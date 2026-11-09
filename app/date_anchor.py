@@ -21,6 +21,18 @@ from app.normalization import parse_date
 
 logger = logging.getLogger(__name__)
 
+# apply_date_anchor_normalization の戻り値理由定数（Issue #50 レビュー P2#1）。
+# 成功時は (True, (offset_x, offset_y))、失敗時は (False, <REASON>) を返す。
+# ANCHOR_UNRESOLVED（date 候補 0 件 / 曖昧で解決不能）のみが force 発火対象。
+ANCHOR_OK = "ok"
+NO_DB = "no_db"
+NO_DATE_OR_CLINIC = "no_date_or_clinic"
+NO_TEMPLATE = "no_template"
+NO_DATE_COORDS = "no_date_coords"
+NO_OCR_ENTRIES = "no_ocr_entries"
+ANCHOR_UNRESOLVED = "anchor_unresolved"
+NOT_NORMALIZED = "not_normalized"
+
 
 def _is_valid_calendar_date(iso_date: Optional[str]) -> bool:
     """Return True if ``iso_date`` is a real calendar date (YYYY-MM-DD).
@@ -238,7 +250,7 @@ def apply_date_anchor_normalization(
     db_path: Optional[str | Path],
     proximity_threshold: float = 50.0,
     output_dir: Optional[Path | str] = None,
-) -> Optional[tuple[int, int]]:
+) -> tuple[bool, str | tuple[int, int]]:
     """Re-normalize a raw_data file to date-anchor basis using a learned template.
 
     High-level orchestration used by both the image-processing and watcher paths:
@@ -263,36 +275,43 @@ def apply_date_anchor_normalization(
             with coordinate-extracted field values.
 
     Returns:
-        (offset_x, offset_y) if re-normalized, else None.
+        Tuple of (ok, detail):
+        - (True, (offset_x, offset_y)) when re-normalized successfully.
+        - (False, <REASON>) when the anchor could not be applied (caller keeps
+          the legacy normalization). REASON is one of the module constants:
+          NO_DB / NO_DATE_OR_CLINIC / NO_TEMPLATE / NO_DATE_COORDS /
+          NO_OCR_ENTRIES / ANCHOR_UNRESOLVED / NOT_NORMALIZED.
+          Only ANCHOR_UNRESOLVED (zero or ambiguous date candidates) is a
+          force-extraction target (Issue #50).
     """
     raw_path = Path(raw_path)
 
     if not db_path:
-        return None
+        return (False, NO_DB)
 
     structured_date = structured.get("date")
     clinic_name = structured.get("clinic")
     if not structured_date or not clinic_name:
-        return None
+        return (False, NO_DATE_OR_CLINIC)
 
     from app.db import get_latest_template_by_clinic, get_or_create_clinic
 
     clinic_id = get_or_create_clinic(db_path, str(clinic_name).strip())
     template = get_latest_template_by_clinic(db_path, clinic_id)
     if not template:
-        return None
+        return (False, NO_TEMPLATE)
 
     coords = template.get("coords_corrections") or {}
     template_date_box = coords.get("date")
     if template_date_box is None:
-        return None  # date 未学習 → 従来方式
+        return (False, NO_DATE_COORDS)  # date 未学習 → 従来方式
 
     from app.input import read_json
     from app.coord_normalizer import normalize_coordinates_by_anchor
 
     ocr_entries = _to_ocr_entries(read_json(raw_path))
     if not ocr_entries:
-        return None
+        return (False, NO_OCR_ENTRIES)
     template_basis = template.get("coord_basis") or "topmost"
     anchor_box = resolve_date_anchor(
         ocr_entries,
@@ -303,11 +322,11 @@ def apply_date_anchor_normalization(
         proximity_threshold=proximity_threshold,
     )
     if anchor_box is None:
-        return None
+        return (False, ANCHOR_UNRESOLVED)
 
     result = normalize_coordinates_by_anchor(raw_path, anchor_box)
     if not result.get("normalized"):
-        return None
+        return (False, NOT_NORMALIZED)
 
     offset_x = result["offset_x"]
     offset_y = result["offset_y"]
@@ -322,7 +341,7 @@ def apply_date_anchor_normalization(
         # template 自身の date box 位置（topmost 座標系）でシフトする（Issue #39-4）。
         new_coords = shift_template_to_date_basis(coords)
         if new_coords is None:
-            return None  # date 未学習 → 従来方式
+            return (False, NO_DATE_COORDS)  # date 未学習 → 従来方式
         _utb(db_path, clinic_id, new_coords, changed_fields=list(coords.keys()))
         date_basis_coords = new_coords
         logger.info(
@@ -358,7 +377,97 @@ def apply_date_anchor_normalization(
             proximity_threshold=proximity_threshold,
         )
 
-    return (offset_x, offset_y)
+    return (True, (offset_x, offset_y))
+
+
+def apply_date_basis_force(
+    raw_path: Path,
+    structured: Dict[str, Any],
+    db_path: Optional[str | Path],
+    proximity_threshold: float = 50.0,
+    output_dir: Optional[Path | str] = None,
+) -> bool:
+    """Force date-basis coordinate extraction without resolving the date anchor (Issue #50).
+
+    When ``apply_date_anchor_normalization()`` cannot resolve the date anchor
+    (e.g. zero date candidates), this fallback applies the clinic's date-basis
+    template ``coords_corrections`` directly with ``search_fields_by_proximity``
+    to extract name / amount from the raw OCR boxes.
+
+    Gate (Issue #50 acceptance 3): runs only when
+    - ``db_path`` is provided,
+    - ``structured['clinic']`` is non-empty (clinic name extracted),
+    - the latest template has ``coord_basis == 'date'``,
+    - and ``coords_corrections['date']`` is learned.
+
+    No re-normalization happens; the raw stays in its original basis. Fields
+    are only taken from boxes found within ``proximity_threshold`` of the
+    template coords (fields with no nearby box are never candidates). A field
+    that already has a non-empty structured value is preserved — the extraction
+    only fills empty/None fields (Issue #50 review P1#2: a shifted frame must
+    not overwrite an existing value with a wrong one). The structured dict is
+    updated in place and, when ``output_dir`` is given,
+    ``*-structured_data.json`` is rewritten via OutputWriter. The DB receipt's
+    stored ocr_json is synced via ``update_receipt_ocr_json_by_source`` (no
+    insert — no duplicate receipts).
+
+    Returns:
+        True when at least one structured field was updated, False otherwise
+        (gate not passed, nothing extracted, or nothing changed).
+    """
+    raw_path = Path(raw_path)
+
+    if not db_path:
+        return False
+    clinic_name = (structured.get("clinic") or "").strip()
+    if not clinic_name:
+        return False
+
+    from app.db import get_latest_template_by_clinic, get_or_create_clinic
+
+    clinic_id = get_or_create_clinic(db_path, clinic_name)
+    template = get_latest_template_by_clinic(db_path, clinic_id)
+    if not template:
+        return False
+    if (template.get("coord_basis") or "topmost") != "date":
+        return False
+    coords = template.get("coords_corrections") or {}
+    if coords.get("date") is None:
+        return False  # date 未学習 → force 対象外（#40 ガードと整合）
+
+    from app.coord_search import search_fields_by_proximity
+    from app.input import read_json
+
+    entries = _to_ocr_entries(read_json(raw_path))
+    if not entries:
+        return False
+
+    proximity = search_fields_by_proximity(entries, coords, threshold=proximity_threshold)
+    changed = False
+    for field_name, text in proximity.items():
+        if field_name == "date":
+            continue
+        if not text:
+            continue
+        existing = structured.get(field_name)
+        if existing and existing != text:
+            # 既存の非空値は保守（位置ずれ時の誤上書き防止 / Issue #50 レビュー P1#2）
+            continue
+        if existing != text:
+            structured[field_name] = text
+            changed = True
+    if not changed:
+        return False
+
+    if output_dir is not None:
+        from app.structural_parser import OutputWriter
+
+        OutputWriter().write(Path(output_dir), raw_path, structured)
+
+    from app.db import update_receipt_ocr_json_by_source
+
+    update_receipt_ocr_json_by_source(db_path, str(raw_path), entries)
+    return True
 
 
 def _apply_coordinate_extraction(
