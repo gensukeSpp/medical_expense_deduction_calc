@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from app.date_anchor import (
+    NO_DB,
+    NO_DATE_COORDS,
     find_date_candidates,
     resolve_date_anchor,
     apply_date_anchor_normalization,
@@ -283,7 +285,7 @@ class TestApplyDateAnchorNormalization:
         structured = {"clinic": "あおばクリニック", "amount": 3800, "date": "2026-01-15"}
         result = apply_date_anchor_normalization(raw_path, structured, temp_db)
 
-        assert result == (50, 100)
+        assert result == (True, (50, 100))
 
         # raw が date 基準へ再正規化されている（date box top-left -> (0,0)）
         reraw = json.loads(raw_path.read_text(encoding="utf-8"))
@@ -326,7 +328,7 @@ class TestApplyDateAnchorNormalization:
         )
 
         structured = {"clinic": "あおばクリニック", "amount": 3800, "date": "2026-01-15"}
-        assert apply_date_anchor_normalization(raw_path, structured, temp_db) is None
+        assert apply_date_anchor_normalization(raw_path, structured, temp_db) == (False, NO_DATE_COORDS)
 
         # raw は未変更
         assert json.loads(raw_path.read_text(encoding="utf-8"))[0]["box"][0] == [50, 100]
@@ -335,7 +337,7 @@ class TestApplyDateAnchorNormalization:
         raw_path = tmp_path / "c.json"
         raw_path.write_text("[]", encoding="utf-8")
         structured = {"clinic": "あおばクリニック", "date": "2026-01-15"}
-        assert apply_date_anchor_normalization(raw_path, structured, None) is None
+        assert apply_date_anchor_normalization(raw_path, structured, None) == (False, NO_DB)
 
     def test_anchor_offset_mismatch_template_date_at_origin(
         self,
@@ -393,7 +395,7 @@ class TestApplyDateAnchorNormalization:
         result = apply_date_anchor_normalization(raw_path, structured, temp_db)
 
         # raw は date 基準へ再正規化（raw date box top-left -> (0,0)）
-        assert result == (80, 120)
+        assert result == (True, (80, 120))
         reraw = json.loads(raw_path.read_text(encoding="utf-8"))
         assert reraw[0]["box"][0] == [0, 0]
 
@@ -491,7 +493,7 @@ class TestApplyDateAnchorNormalization:
         result = apply_date_anchor_normalization(raw_path, structured, temp_db, output_dir=output_dir)
 
         # date 基準へ再正規化された
-        assert result is not None
+        assert result[0] is True
         reraw = json.loads(raw_path.read_text(encoding="utf-8"))
         assert reraw[0]["box"][0] == [0, 0]
 
@@ -553,12 +555,84 @@ class TestApplyDateBasisForce:
             ],
         )
 
-        structured = {"name": "山田 太郎", "clinic": "あおばクリニック", "amount": 3800, "date": "2026-01-15"}
+        structured = {"name": "山田 太郎", "clinic": "あおばクリニック", "amount": None, "date": "2026-01-15"}
         result = apply_date_basis_force(raw_path, structured, temp_db)
 
-        assert result is not None
+        assert result is True
         assert structured["name"] == "山田 太郎"
-        assert structured["amount"] == "3,800"  # 近傍抽出で上書き可能
+        assert structured["amount"] == "3,800"  # 空欄を近傍抽出で埋める
+
+    def test_preserves_existing_nonempty_value(self, tmp_path: Path, temp_db: Path):
+        """既存の非空値は抽出値と異なっても上書きしない（レビュー P1#2）."""
+        import uuid
+
+        from app.db import upsert_clinic, upsert_template
+        from app.output import write_json_atomic
+
+        clinic_id = str(uuid.uuid4())
+        upsert_clinic(temp_db, clinic_id, "あおばクリニック")
+        upsert_template(
+            temp_db,
+            str(uuid.uuid4()),
+            clinic_id,
+            version=1,
+            coords_corrections={
+                "date": [[0, 0], [150, 0], [150, 30], [0, 30]],
+                "amount": [[400, 300], [480, 300], [480, 340], [400, 340]],
+            },
+            coord_basis="date",
+        )
+
+        raw_path = tmp_path / "raw_data.json"
+        write_json_atomic(
+            raw_path,
+            [
+                # 位置ずれした想定: 別の文字列が amount box 近傍にある
+                {"text": "3,800", "confidence": 0.88, "box": [[400, 300], [480, 300], [480, 340], [400, 340]]},
+            ],
+        )
+
+        structured = {"clinic": "あおばクリニック", "amount": 9999, "date": "2026-01-15"}
+        result = apply_date_basis_force(raw_path, structured, temp_db)
+
+        assert result is False  # 何も更新していない
+        assert structured["amount"] == 9999  # 既存値を保守
+
+    def test_returns_false_when_nothing_extracted(self, tmp_path: Path, temp_db: Path):
+        """近傍に box が無く抽出ゼロの場合は False（更新なし）."""
+        import uuid
+
+        from app.db import upsert_clinic, upsert_template
+        from app.output import write_json_atomic
+
+        clinic_id = str(uuid.uuid4())
+        upsert_clinic(temp_db, clinic_id, "あおばクリニック")
+        upsert_template(
+            temp_db,
+            str(uuid.uuid4()),
+            clinic_id,
+            version=1,
+            coords_corrections={
+                "date": [[0, 0], [150, 0], [150, 30], [0, 30]],
+                "amount": [[400, 300], [480, 300], [480, 340], [400, 340]],
+            },
+            coord_basis="date",
+        )
+
+        raw_path = tmp_path / "raw_data.json"
+        write_json_atomic(
+            raw_path,
+            [
+                # amount box から遠い位置 → 近傍一致なし
+                {"text": "3,800", "confidence": 0.88, "box": [[900, 900], [980, 900], [980, 940], [900, 940]]},
+            ],
+        )
+
+        structured = {"clinic": "あおばクリニック", "amount": None, "date": "2026-01-15"}
+        result = apply_date_basis_force(raw_path, structured, temp_db)
+
+        assert result is False
+        assert structured["amount"] is None
 
     def test_skips_unless_date_basis_and_clinic(self, tmp_path: Path, temp_db: Path):
         """coord_basis!='date' または clinic 空なら force しない（受入要件3）."""
@@ -585,11 +659,11 @@ class TestApplyDateBasisForce:
         )
 
         # topmost template → force しない
-        assert apply_date_basis_force(raw_path, {"clinic": "あおばクリニック", "amount": 3800}, temp_db) is None
+        assert apply_date_basis_force(raw_path, {"clinic": "あおばクリニック", "amount": 3800}, temp_db) is False
         # clinic 空 → force しない
-        assert apply_date_basis_force(raw_path, {"clinic": "", "amount": 3800}, temp_db) is None
+        assert apply_date_basis_force(raw_path, {"clinic": "", "amount": 3800}, temp_db) is False
         # db 未指定 → force しない
-        assert apply_date_basis_force(raw_path, {"clinic": "あおばクリニック", "amount": 3800}, None) is None
+        assert apply_date_basis_force(raw_path, {"clinic": "あおばクリニック", "amount": 3800}, None) is False
 
     def test_skips_when_date_unlearned(self, tmp_path: Path, temp_db: Path):
         """date 未学習（coords_corrections['date'] なし）の date 基準 template は force 対象外（受入要件3）."""
@@ -616,7 +690,7 @@ class TestApplyDateBasisForce:
         )
 
         structured = {"clinic": "あおばクリニック", "name": None}
-        assert apply_date_basis_force(raw_path, structured, temp_db) is None
+        assert apply_date_basis_force(raw_path, structured, temp_db) is False
         assert structured["name"] is None  # 変更されない
 
     def test_writes_structured_json_and_updates_db_ocr_json(self, tmp_path: Path, temp_db: Path):
@@ -668,7 +742,7 @@ class TestApplyDateBasisForce:
         structured = {"clinic": "あおばクリニック", "name": None}
         result = apply_date_basis_force(raw_path, structured, temp_db, output_dir=output_dir)
 
-        assert result is not None
+        assert result is True
         assert structured["name"] == "山田 太郎"
         out = output_dir / "a_1-structured_data.json"
         assert out.exists()
