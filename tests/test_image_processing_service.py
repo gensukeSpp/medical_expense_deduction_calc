@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.date_anchor import ANCHOR_UNRESOLVED, NO_TEMPLATE
 from app.services.image_processing_service import ImageProcessingService
 
 # ------------------------------------------------------------------
@@ -287,7 +288,7 @@ class TestProcess:
             patch.object(service, "_get_topmost_confidence", return_value=(False, 0.95)),
             patch.object(service, "_normalize_coords", return_value=False),
             patch.object(service, "_parse_structured", return_value={"clinic": "A", "date": "2026-01-15"}),
-            patch("app.date_anchor.apply_date_anchor_normalization") as mock_anchor,
+            patch("app.date_anchor.apply_date_anchor_normalization", return_value=(True, (0, 0))) as mock_anchor,
         ):
             service.process(image_path, output_dir, model="mock", db_path="/tmp/db.sqlite3")
 
@@ -310,7 +311,7 @@ class TestProcess:
             patch.object(service, "_get_topmost_confidence", return_value=(True, 0.5)),
             patch.object(service, "_normalize_coords", return_value=True),
             patch.object(service, "_parse_structured", return_value={"clinic": "A", "date": "2026-01-15"}),
-            patch("app.date_anchor.apply_date_anchor_normalization") as mock_anchor,
+            patch("app.date_anchor.apply_date_anchor_normalization", return_value=(True, (0, 0))) as mock_anchor,
         ):
             service.process(image_path, output_dir, model="mock", db_path="/tmp/db.sqlite3")
 
@@ -328,7 +329,9 @@ class TestProcess:
             patch.object(service, "_get_topmost_confidence", return_value=(False, 0.95)),
             patch.object(service, "_normalize_coords", return_value=False),
             patch.object(service, "_parse_structured", return_value={"clinic": "A", "date": "2026-01-15"}),
-            patch("app.date_anchor.apply_date_anchor_normalization", return_value=None) as mock_anchor,
+            patch(
+                "app.date_anchor.apply_date_anchor_normalization", return_value=(False, ANCHOR_UNRESOLVED)
+            ) as mock_anchor,
             patch("app.date_anchor.apply_date_basis_force") as mock_force,
         ):
             service.process(image_path, output_dir, model="mock", db_path="/tmp/db.sqlite3")
@@ -337,6 +340,23 @@ class TestProcess:
         mock_force.assert_called_once_with(
             raw_path, {"clinic": "A", "date": "2026-01-15"}, "/tmp/db.sqlite3", output_dir=output_dir
         )
+
+    def test_process_does_not_call_force_for_other_failure_reasons(
+        self, service: ImageProcessingService, image_path: Path, output_dir: Path
+    ):
+        """anchor 失敗が date 候補 0 件以外（例: テンプレなし）のときは force を呼ばない（レビュー P2#1）."""
+        with (
+            patch.object(service, "_run_ocr"),
+            patch.object(service, "_get_topmost_confidence", return_value=(False, 0.95)),
+            patch.object(service, "_normalize_coords", return_value=False),
+            patch.object(service, "_parse_structured", return_value={"clinic": "A", "date": "2026-01-15"}),
+            patch("app.date_anchor.apply_date_anchor_normalization", return_value=(False, NO_TEMPLATE)) as mock_anchor,
+            patch("app.date_anchor.apply_date_basis_force") as mock_force,
+        ):
+            service.process(image_path, output_dir, model="mock", db_path="/tmp/db.sqlite3")
+
+        mock_anchor.assert_called_once()
+        mock_force.assert_not_called()
 
     def test_process_does_not_call_force_when_anchor_resolved(
         self, service: ImageProcessingService, image_path: Path, output_dir: Path
@@ -349,7 +369,7 @@ class TestProcess:
             patch.object(service, "_get_topmost_confidence", return_value=(False, 0.95)),
             patch.object(service, "_normalize_coords", return_value=False),
             patch.object(service, "_parse_structured", return_value={"clinic": "A", "date": "2026-01-15"}),
-            patch("app.date_anchor.apply_date_anchor_normalization", return_value=(0, 0)) as mock_anchor,
+            patch("app.date_anchor.apply_date_anchor_normalization", return_value=(True, (0, 0))) as mock_anchor,
             patch("app.date_anchor.apply_date_basis_force") as mock_force,
         ):
             service.process(image_path, output_dir, model="mock", db_path="/tmp/db.sqlite3")

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.date_anchor import ANCHOR_UNRESOLVED, NO_TEMPLATE
 from app.services.receipt_processor import ReceiptProcessor
 from app.services.file_repository import FileRepository
 
@@ -163,7 +164,7 @@ class TestDateBasisForceIntegration:
     """Issue #50: apply_date_anchor_normalization が None のとき apply_date_basis_force が呼ばれる."""
 
     @patch("app.date_anchor.apply_date_basis_force")
-    @patch("app.date_anchor.apply_date_anchor_normalization", return_value=None)
+    @patch("app.date_anchor.apply_date_anchor_normalization", return_value=(False, ANCHOR_UNRESOLVED))
     @patch(
         "app.coord_normalizer.normalize_coordinates",
         return_value={"normalized": True, "low_confidence": False, "offset_x": 0, "offset_y": 0},
@@ -202,7 +203,7 @@ class TestDateBasisForceIntegration:
         mock_force.assert_called_once()
 
     @patch("app.date_anchor.apply_date_basis_force")
-    @patch("app.date_anchor.apply_date_anchor_normalization", return_value=(0, 0))
+    @patch("app.date_anchor.apply_date_anchor_normalization", return_value=(True, (0, 0)))
     @patch(
         "app.coord_normalizer.normalize_coordinates",
         return_value={"normalized": True, "low_confidence": False, "offset_x": 0, "offset_y": 0},
@@ -210,6 +211,49 @@ class TestDateBasisForceIntegration:
     @patch("app.structural_parser.process_input_json", return_value={"clinic": "A", "date": "2026-01-15"})
     @patch("app.ocr_pipeline.process_image", return_value=[])
     def test_force_not_called_when_anchor_resolved(
+        self,
+        mock_process_image,
+        mock_process_input_json,
+        mock_normalize_coordinates,
+        mock_anchor,
+        mock_force,
+        tmp_path: Path,
+        image_path: Path,
+    ):
+        file_repo = FileRepository(
+            output_dir=tmp_path / "output",
+            processed_dir=tmp_path / "processed",
+            failed_dir=tmp_path / "failed",
+        )
+        proc = ReceiptProcessor(
+            ocr=MagicMock(),
+            file_repository=file_repo,
+            output_dir=tmp_path / "output",
+            model="mock",
+            db_path=tmp_path / "db.sqlite3",
+            retries=1,
+        )
+        proc.output_dir.mkdir(parents=True, exist_ok=True)
+
+        result = proc._sync_process(image_path)
+
+        assert result is True
+        mock_anchor.assert_called_once()
+        mock_force.assert_not_called()
+
+
+class TestForceNotCalledForOtherAnchorReasons:
+    """レビュー P2#1: anchor 失敗が date 候補 0 件以外なら force を呼ばない."""
+
+    @patch("app.date_anchor.apply_date_basis_force")
+    @patch("app.date_anchor.apply_date_anchor_normalization", return_value=(False, NO_TEMPLATE))
+    @patch(
+        "app.coord_normalizer.normalize_coordinates",
+        return_value={"normalized": True, "low_confidence": False, "offset_x": 0, "offset_y": 0},
+    )
+    @patch("app.structural_parser.process_input_json", return_value={"clinic": "A", "date": "2026-01-15"})
+    @patch("app.ocr_pipeline.process_image", return_value=[])
+    def test_force_not_called_when_no_template(
         self,
         mock_process_image,
         mock_process_input_json,
