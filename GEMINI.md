@@ -59,12 +59,15 @@ python tasks/issue_4/run_e2e.py
 
 ## Current Progress & Upcoming Tasks
 
-### Implemented Features (as of 2026-11-02)
+### Implemented Features (as of 2026-11-09)
 - Complete pipeline integration (OCR + LLM Extraction + Normalization + Automatic Parsing).
-- **Date-Anchor Verification Tool & Spec (Issue #47 / PR #49)**:
-  - Added `app/verify_date_anchor.py` as a non-destructive, read-only CLI verification tool for tracing and validating date-anchor re-normalization and coordinate extraction pipeline stages (`find_date_candidates` → `resolve_date_anchor` → `normalize_coordinates_by_anchor` → `search_fields_by_proximity`) using safe copy-on-verify isolation.
-  - Added comprehensive unit tests in `tests/test_verify_date_anchor.py` covering success flows, topmost basis preconditions, missing templates, and ambiguous/tie candidate resolution (safe fallback).
-  - Added formal specification (`specs/2026-11-02-spec.md`) and task documentation.
+- **Forced Date-Basis Coordinate Extraction Fallback (Issue #50 / PR #53)**:
+  - Added `apply_date_basis_force()` in `app/date_anchor.py` to perform un-anchored proximity extraction (`search_fields_by_proximity`) when date-anchor resolution returns `None` (zero candidates or tie), provided `coord_basis == 'date'` and the date box is learned.
+  - Extended verification tool (`app/verify_date_anchor.py`) and CLI with `--force` mode to inspect fallback extractions.
+  - Integrated forced fallback into `ImageProcessingService` and `ReceiptProcessor` pipelines.
+- **`coord_basis` Consistency Fix on Correction (Issue #51 / PR #52)**:
+  - Enhanced `upsert_template()` in `app/db.py` to persist `coord_basis`.
+  - Updated `process_correction_feedback()` to reset `coord_basis` to `'topmost'` when processing user corrections on date-basis templates.
 - **Manual Coordinate Basis Toggle & Admin (Issue #42)**:
   - Added Web administration interface (`GET /admin/templates` and `POST /admin/templates/{clinic_id}/basis`) to manually switch template `coord_basis` from `topmost` to `date` as a verification fallback.
   - Implemented `TemplateAdminService` (`app/services/template_admin_service.py`) for business logic encapsulation and safe transition validation (requires learned date box, records `manual_basis_toggle` in `template_history`).
