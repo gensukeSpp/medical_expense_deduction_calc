@@ -210,7 +210,7 @@ date 基準テンプレートでも、raw 内に構造化 date と一致する�
   anchor 解決不能時でも `report["resolution"]["mode"] == "force"` と `report["force_extraction"]`
   に近傍抽出結果を報告する（元ファイル・DB は不変更のまま）。本ツールは force 抽出を独自実装しており
   上書き検証の対象外（報告のみ・不変更設計）。
-- 詳細は `specs/2026-11-06-spec.md`（Issue #50）と `specs/2026-11-09-spec.md`（レビュー対応）。
+- 詳細は `specs/2026-11-06-2-spec.md`（Issue #50）と `specs/2026-11-09-spec.md`（レビュー対応）。
 
 ## 実装場所
 

@@ -8,6 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+
 .serena
 .pytest_cache/
 output_json/
@@ -19,6 +20,7 @@ logs/
 verify_logs/
 tmp/
 test*.db
+.coverage
 
 # Added by code-review-graph
 .code-review-graph/
