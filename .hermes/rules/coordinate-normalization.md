@@ -195,17 +195,22 @@ date 基準テンプレートでも、raw 内に構造化 date と一致する�
 - **ゲート（受入要件3）**: `db_path` あり **かつ** `structured.clinic` 非空 **かつ**
   最新 template の `coord_basis == 'date'` **かつ** `coords_corrections['date']` 学習済み。
   date 未学習 template は対象外（#40 ガードと整合）。
-- **発動タイミング**: `apply_date_anchor_normalization()` が `None` のときのみ（補完）。
-  low_confidence 時と anchor 確定時は発動しない（二重補正防止）。
+- **発動タイミング**: `apply_date_anchor_normalization()` の戻り値が `(False, ANCHOR_UNRESOLVED)`
+  （date 候補 0 件 / 曖昧で解決不能）のとき**のみ**（補完）。
+  low_confidence 時・anchor 確定時・テンプレなし等の他理由失敗時は発動しない（二重補正防止 /
+  PR #53 レビュー P2#1 で限定）。
 - **動作**: 再正規化は**行わない**（raw は元の基準のまま）。template の `coords_corrections` に
   `search_fields_by_proximity` を直接適用し、date 以外のフィールド（name / amount 等）を
-  近傍抽出して `structured` へ上書き（変化時のみ）。`OutputWriter` で
-  `*-structured_data.json` を書き直し、`update_receipt_ocr_json_by_source` で DB の
-  ocr_json を同期する（`insert_receipt` は呼ばない・二重登録なし）。
+  近傍抽出して structured へ反映する。**既存の非空 structured 値は上書きしない**
+  （空欄 / None のみ埋める。フレームずれ時の誤値上書き防止 / PR #53 レビュー P1#2）。
+  1 件以上更新時のみ `OutputWriter` で `*-structured_data.json` を書き直し、
+  `update_receipt_ocr_json_by_source` で DB の ocr_json を同期する
+  （`insert_receipt` は呼ばない・二重登録なし）。戻り値は `bool`（更新有無）。
 - **検証ツール**: `app/verify_date_anchor.py` に `--force` / `verify_date_anchor(force=True)` を追加。
   anchor 解決不能時でも `report["resolution"]["mode"] == "force"` と `report["force_extraction"]`
-  に近傍抽出結果を報告する（元ファイル・DB は不変更のまま）。
-- 詳細は `specs/2026-11-06-spec.md`（Issue #50）。
+  に近傍抽出結果を報告する（元ファイル・DB は不変更のまま）。本ツールは force 抽出を独自実装しており
+  上書き検証の対象外（報告のみ・不変更設計）。
+- 詳細は `specs/2026-11-06-spec.md`（Issue #50）と `specs/2026-11-09-spec.md`（レビュー対応）。
 
 ## 実装場所
 

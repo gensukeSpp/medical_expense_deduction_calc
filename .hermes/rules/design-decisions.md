@@ -38,6 +38,11 @@ clinic のテンプレートに `date` 座標が学習済みで、同一 clinic/
 - coord_basis 手動切替（Issue #42, [中-1] 対応）: Web 管理画面から topmost → date へ手動切替できる。
   `apply_date_anchor_normalization` は `template_coords` で日付候補 2 件を解決し、`output_dir` 指定時に
   date 基準へ再正規化した raw へ座標ベース抽出を適用して `*-structured_data.json` へ反映する。
+- 強制 date 基準抽出（Issue #50 / PR #53 レビュー対応）: anchor 解決不能（date 候補 0 件等）でも
+  `apply_date_basis_force()` で近傍抽出する。ただし **anchor 失敗理由が `ANCHOR_UNRESOLVED` のときのみ発火**
+  （戻り値は `(True, offset)` / `(False, reason)` ペア。テンプレなし等では不発）、かつ
+  **既存の非空 structured 値は上書きしない**（空欄を埋めるのみ。位置ずれ時の誤上書き防止）。
+  戻り値は bool（更新有無）。詳細は `specs/2026-11-09-spec.md`。
 
 詳細（判定条件・閾値・DB 移行・手動切替・前方補正ガード）は以下を参照:
 - [.hermes/rules/coordinate-normalization.md](./coordinate-normalization.md)
