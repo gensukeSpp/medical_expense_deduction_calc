@@ -122,3 +122,87 @@ def test_sort_by_date_descending():
     ]
     result = sort_by_date(rows, ascending=False)
     assert [r.file_stem for r in result] == ["b", "a"]
+
+
+# --- ReceiptListService: ファイル読取・補填額保存 ---
+
+from app.output import write_json_atomic  # noqa: E402
+from app.services.receipt_list_service import ReceiptListService  # noqa: E402
+
+
+def _write_sample(output_dir, stem, data):
+    write_json_atomic(output_dir / f"{stem}-structured_data.json", data)
+
+
+def test_load_rows_reads_structured_files(tmp_path):
+    out = tmp_path / "output_json"
+    out.mkdir()
+    _write_sample(out, "r1", {"name": "山田", "clinic": "あおば", "amount": 5000, "date": "2026-01-15"})
+    service = ReceiptListService(out)
+    rows = service.load_rows()
+    assert len(rows) == 1
+    assert rows[0].file_stem == "r1"
+    assert rows[0].amount == 5000
+
+
+def test_get_page_context_filters_and_totals(tmp_path):
+    out = tmp_path / "output_json"
+    out.mkdir()
+    _write_sample(
+        out,
+        "a",
+        {"name": "山田", "clinic": "A", "amount": 5000, "date": "2026-01-01", "compensation": 6000},
+    )
+    _write_sample(out, "b", {"name": "鈴木", "clinic": "B", "amount": 3000, "date": "2026-02-01"})
+    service = ReceiptListService(out)
+    ctx = service.get_page_context("2026-01", "asc", [])
+    assert ctx["total"] == 0  # A: 5000-6000 -> 0 で、1月分のみ
+    assert [r.file_stem for r in ctx["rows"]] == ["a"]
+    assert ctx["months"] == ["2026-01", "2026-02"]
+
+
+def test_get_page_context_name_filter_changes_total(tmp_path):
+    """氏名選択で合計が表示対象分に変わる（受け入れ要件1）"""
+    out = tmp_path / "output_json"
+    out.mkdir()
+    _write_sample(out, "a", {"name": "山田", "clinic": "A", "amount": 1000, "date": "2026-01-01"})
+    _write_sample(out, "b", {"name": "鈴木", "clinic": "B", "amount": 2000, "date": "2026-01-02"})
+    service = ReceiptListService(out)
+    all_ctx = service.get_page_context("2026-01", "asc", [])
+    assert all_ctx["total"] == 3000
+    yamada_ctx = service.get_page_context("2026-01", "asc", ["山田"])
+    assert yamada_ctx["total"] == 1000
+    assert yamada_ctx["selected_names"] == ["山田"]
+
+
+def test_save_compensation_persists_to_json(tmp_path):
+    out = tmp_path / "output_json"
+    out.mkdir()
+    _write_sample(out, "a", {"name": "山田", "clinic": "A", "amount": 5000, "date": "2026-01-01"})
+    service = ReceiptListService(out)
+    service.save_compensation("a", "6000")
+    data = service.file_repo.load_receipt("a")
+    assert data["compensation"] == 6000
+
+
+def test_save_compensation_blank_becomes_zero(tmp_path):
+    out = tmp_path / "output_json"
+    out.mkdir()
+    _write_sample(out, "a", {"name": "山田", "clinic": "A", "amount": 5000, "date": "2026-01-01"})
+    service = ReceiptListService(out)
+    service.save_compensation("a", "")
+    data = service.file_repo.load_receipt("a")
+    assert data["compensation"] == 0
+
+
+def test_save_compensation_keeps_other_fields(tmp_path):
+    """補填額保存は他のフィールドを壊さない"""
+    out = tmp_path / "output_json"
+    out.mkdir()
+    _write_sample(out, "a", {"name": "山田", "clinic": "A", "amount": 5000, "date": "2026-01-01"})
+    service = ReceiptListService(out)
+    service.save_compensation("a", "1000")
+    data = service.file_repo.load_receipt("a")
+    assert data["name"] == "山田"
+    assert data["amount"] == 5000
+    assert data["date"] == "2026-01-01"
