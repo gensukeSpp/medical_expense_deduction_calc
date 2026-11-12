@@ -15,6 +15,7 @@ Phase 1（読み込み、抽出、修正、キャッシュ）のみを実装。�
 │
 ├── app/                       # 本体コード
 │   ├── args.py                # CLI 引数定義・ディレクトリ初期化
+│   ├── calc.py                # 一覧表示の純粋計算 (contribution/total/filter/sort) [Issue #54]
 │   ├── db.py                  # SQLite ヘルパー (全テーブル CRUD)
 │   ├── db_migrations.py       # スキーママイグレーション
 │   ├── schema.sql             # 最終的な SQL スキーマ (source of truth)
@@ -47,10 +48,11 @@ Phase 1（読み込み、抽出、修正、キャッシュ）のみを実装。�
 │   │   ├── ocr_coordinate_service.py     # 座標検索・フィードバック
 │   │   ├── receipt_updater.py            # receipt 更新オーケストレーター
 │   │   ├── template_admin_service.py     # テンプレート管理・coord_basis 手動切替 [Issue #42]
+│   │   ├── receipt_list_service.py       # 月別一覧の文脈構築・補填額保存 [Issue #54]
 │   │
 │   └── web/                   # Web UI (FastAPI + Jinja2)
 │       ├── server.py          # FastAPI アプリ作成
-│       └── templates/         # HTML テンプレート
+│       └── templates/         # HTML テンプレート (list.html / list_table.html = 月別一覧 [Issue #54])
 │
 ├── docs/
 │   ├── DEVELOPMENT.md         # 開発環境セットアップ
@@ -262,6 +264,7 @@ refactor #<issue>: <description>
 - [.hermes/rules/design-decisions.md](./.hermes/rules/design-decisions.md) — 設計判断の要約と相互リンク
 - [.hermes/rules/ocr-preprocessing.md](./.hermes/rules/ocr-preprocessing.md) — 前処理の適用条件・モード・出力ファイル
 - [.hermes/rules/coordinate-normalization.md](./.hermes/rules/coordinate-normalization.md) — 座標正規化・date anchor・coord_basis
+- [.hermes/rules/monthly-list-calculation.md](./.hermes/rules/monthly-list-calculation.md) — 月別一覧・合計計算・補填額の行単位控除
 
 ## 出力ファイル命名
 
@@ -281,10 +284,12 @@ refactor #<issue>: <description>
 - スキーマ: `docs/schema.sql`
 - アーキテクチャスナップショット: `docs/architecture/` 配下
 - date anchor 実データ検証ツール: `app/verify_date_anchor.py`（[tasks/issue_47/](tasks/issue_47/overview.md)）
+- spec ファイル: `specs/{機能}-spec.md`（機能起点命名。Issue #54 以降）
 - 変更頻度の高いルール (`rules`):
   - CLI 使い方・引数一覧: `.hermes/rules/cli.md`
   - OCR 前処理・出力ファイル命名: `.hermes/rules/ocr-preprocessing.md`
   - 座標正規化・date anchor・DB coord_basis: `.hermes/rules/coordinate-normalization.md`
+  - 月別一覧・合計計算（行単位の補填控除）: `.hermes/rules/monthly-list-calculation.md`
   - 重要な設計判断: `.hermes/rules/design-decisions.md`
 
 <!-- code-review-graph MCP tools -->
