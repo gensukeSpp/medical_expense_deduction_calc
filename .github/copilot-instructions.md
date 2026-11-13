@@ -36,6 +36,8 @@ Run tests:
 uv run pytest -q
 uv run pytest tests/test_normalization.py -v
 uv run pytest tests/test_normalization.py::test_parse_amount_numeric -v
+uv run pytest tests/test_calc.py -q
+uv run pytest tests/test_web.py -q
 uv run pytest -k "test_parse" -v
 ```
 
@@ -105,3 +107,4 @@ the existing database update path instead.
 
 - `README.md`, `AGENTS.md`, `GEMINI.md`, and `QWEN.md` all describe the same core design: OCR-first receipt processing with SQLite-backed persistence and a human review loop.
 - The app intentionally learns from user correction history to improve clinic-specific templates over time; changes around correction feedback, coordinate matching, and low-confidence handling should be treated as sensitive behavior.
+- This repo already includes web/browser tooling in `.mcp.json` (`playwright` plus `code-review-graph` / `better-code-review-graph`), so browser validation and code-relationship tracing are available when working on the FastAPI review UI or template logic.

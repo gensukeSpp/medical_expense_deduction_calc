@@ -30,8 +30,9 @@ The primary goal is to simplify data entry for medical expenses within a househo
     - `app/llm_extractor.py`: Handles interfacing with the LLM API for extraction.
     - `app/structural_parser.py`: Parses the LLM structural outputs.
     - `app/normalization.py`: Normalizes text, amounts, dates, and clinic names.
+    - `app/calc.py`: Pure mathematical calculations for medical expense contribution, totals, month/name filtering, and sorting.
     - `app/error_logging.py`: Centralized error logging utility.
-    - `app/services/`: Contains service-layer modules for handling business logic and cross-module interactions.
+    - `app/services/`: Contains service-layer modules for handling business logic and cross-module interactions (including `receipt_list_service.py` for monthly list management and compensation persistence).
 - `tasks/`:
     - `tasks/issue_4/run_e2e.py`: E2E test runner validating the extraction output.
 - `tests/`: Contains Unit and E2E test suites.
@@ -59,8 +60,13 @@ python tasks/issue_4/run_e2e.py
 
 ## Current Progress & Upcoming Tasks
 
-### Implemented Features (as of 2026-11-09)
+### Implemented Features (as of 2026-11-12)
 - Complete pipeline integration (OCR + LLM Extraction + Normalization + Automatic Parsing).
+- **Monthly List & Medical Expense Total Calculation (Issue #54 / PR #55)**:
+  - Added pure calculation engine in `app/calc.py` (`compute_contribution = max(0, amount - compensation)`, `compute_total = Σ contribution`, month/name filtering, sorting).
+  - Implemented `ReceiptListService` (`app/services/receipt_list_service.py`) for row loading, page context aggregation, and non-destructive compensation persistence in `structured_data.json`.
+  - Added web routes (`GET /list`, `GET /list/table`, `PUT /list/items/{stem}/compensation`) and templates (`list.html`, `list_table.html`) supporting interactive htmx updates, sorting toggles, month navigation, and name filtering.
+  - Added comprehensive unit (`tests/test_calc.py`) and integration tests (`tests/test_web.py`).
 - **Forced Date-Basis Coordinate Extraction Fallback (Issue #50 / PR #53)**:
   - Added `apply_date_basis_force()` in `app/date_anchor.py` to perform un-anchored proximity extraction (`search_fields_by_proximity`) when date-anchor resolution returns `None` (zero candidates or tie), provided `coord_basis == 'date'` and the date box is learned.
   - Extended verification tool (`app/verify_date_anchor.py`) and CLI with `--force` mode to inspect fallback extractions.

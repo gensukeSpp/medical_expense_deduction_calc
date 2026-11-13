@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>月別一覧 — 医療費控除</title>
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+</head>
+<body>
+    <h1>月別一覧（計算）</h1>
+    <p><a href="/">&larr; トップページに戻る</a></p>
+
+    <!-- htmx swap 対象領域（月ナビ + フィルタ + 表 + 合計） -->
+    <div id="list-table-region">
+        {% include "list_table.html" %}
+    </div>
+</body>
+</html>

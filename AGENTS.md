@@ -15,6 +15,7 @@ Phase 1（読み込み、抽出、修正、キャッシュ）のみを実装。�
 │
 ├── app/                       # 本体コード
 │   ├── args.py                # CLI 引数定義・ディレクトリ初期化
+│   ├── calc.py                # 一覧表示の純粋計算 (contribution/total/filter/sort) [Issue #54]
 │   ├── db.py                  # SQLite ヘルパー (全テーブル CRUD)
 │   ├── db_migrations.py       # スキーママイグレーション
 │   ├── schema.sql             # 最終的な SQL スキーマ (source of truth)
@@ -47,10 +48,11 @@ Phase 1（読み込み、抽出、修正、キャッシュ）のみを実装。�
 │   │   ├── ocr_coordinate_service.py     # 座標検索・フィードバック
 │   │   ├── receipt_updater.py            # receipt 更新オーケストレーター
 │   │   ├── template_admin_service.py     # テンプレート管理・coord_basis 手動切替 [Issue #42]
+│   │   ├── receipt_list_service.py       # 月別一覧の文脈構築・補填額保存 [Issue #54]
 │   │
 │   └── web/                   # Web UI (FastAPI + Jinja2)
 │       ├── server.py          # FastAPI アプリ作成
-│       └── templates/         # HTML テンプレート
+│       └── templates/         # HTML テンプレート (list.html / list_table.html = 月別一覧 [Issue #54])
 │
 ├── docs/
 │   ├── DEVELOPMENT.md         # 開発環境セットアップ
@@ -262,6 +264,7 @@ refactor #<issue>: <description>
 - [.hermes/rules/design-decisions.md](./.hermes/rules/design-decisions.md) — 設計判断の要約と相互リンク
 - [.hermes/rules/ocr-preprocessing.md](./.hermes/rules/ocr-preprocessing.md) — 前処理の適用条件・モード・出力ファイル
 - [.hermes/rules/coordinate-normalization.md](./.hermes/rules/coordinate-normalization.md) — 座標正規化・date anchor・coord_basis
+- [.hermes/rules/monthly-list-calculation.md](./.hermes/rules/monthly-list-calculation.md) — 月別一覧・合計計算・補填額の行単位控除
 
 ## 出力ファイル命名
 
@@ -281,10 +284,12 @@ refactor #<issue>: <description>
 - スキーマ: `docs/schema.sql`
 - アーキテクチャスナップショット: `docs/architecture/` 配下
 - date anchor 実データ検証ツール: `app/verify_date_anchor.py`（[tasks/issue_47/](tasks/issue_47/overview.md)）
+- spec ファイル: `specs/{機能}-spec.md`（機能起点命名。Issue #54 以降）
 - 変更頻度の高いルール (`rules`):
   - CLI 使い方・引数一覧: `.hermes/rules/cli.md`
   - OCR 前処理・出力ファイル命名: `.hermes/rules/ocr-preprocessing.md`
   - 座標正規化・date anchor・DB coord_basis: `.hermes/rules/coordinate-normalization.md`
+  - 月別一覧・合計計算（行単位の補填控除）: `.hermes/rules/monthly-list-calculation.md`
   - 重要な設計判断: `.hermes/rules/design-decisions.md`
 
 <!-- code-review-graph MCP tools -->
@@ -376,8 +381,8 @@ gives you structural context (callers, dependents, test coverage) that file sear
 
 ### Workflow
 
-1. Code review は `review(action="context", base="origin/main")` でスコープを絞る
-   (include_source=false でトークン節約可)。
+1. Code review は `review(action="context", repo_root="<repo絶対パス>", base="origin/main")` でスコープを絞る
+   (include_source=false でトークン節約可)。`repo_root` は必ず明示（後述）。
 2. 影響範囲を `query(action="impact")` で確認する。
 3. テスト網羅は `query(pattern="tests_for", target=<func>)` で確認する。
 4. 純粋リファクタ (ロジック不変) の監査は `review(action="delta", show_line_shifts=true)`
@@ -392,6 +397,28 @@ gives you structural context (callers, dependents, test coverage) that file sear
 - **ソース断片は必要な関数だけ読む**: `include_source=true` は `max_lines_per_file` を小さく（例 50）し、詳細は `read_file` で該当行を読む。
 - **大きな結果は再取得しない**: 出力は `~/.hermes/.../cache/spillover/*.txt` に保存される。`read_file` の offset/limit でページングするか、`execute_code` で JSON を分解して必要な項目だけ抽出する。同じ呼び出しを繰り返さない。
 - **ツール呼び出しはファイル単位で分ける**: 変更が多い PR は `changed_files` をディレクトリ単位（例: `src/components/organisms/` → `src/lib/`）に分割して呼ぶ。
+
+### repo_root の明示（必須）
+
+better-CRG の MCP ツール（`review` / `query` / `graph`）**すべてに `repo_root="<このリポジトリへの絶対パス>"` を必ず明示する**。
+MCP stdio サーバは DB の場所を「サーバ自身の起動時 cwd」から決め（`find_repo_root(cwd)` → 無ければ `Path.cwd()`）、
+Hermes はそのサーバをプロファイルホームを cwd に起動するため、repo_root を省略するとサーバは
+`~/.crg/graph.db`（ホームの空 DB）を参照してしまう。リポジトリの `.crg/graph.db` には到達せず、ランの鮮度は無関係。
+
+- 省略時に起こるエラー（2026-11-12 実測）:
+  `Error calling tool 'review': 005_temporal_columns requires git in repo containing the graph DB ... No .git found walking up from ~/.crg/graph.db`
+  → 空 DB を開くとマイグレーション 005 が走り、これが git HEAD で backfill する必要があるため失敗する。
+- このリポジトリの実 DB は `<repo>/.crg/graph.db`（alembic head 006 / 既に `valid_from_sha` あり）なので、
+  `repo_root` を明示すればマイグレーションは走らず正常に読める（実測確認済み）。
+- 逆に「CLI で `graph build/stats --repo-root .` して鮮度を保った」だけでは、MCP が読む DB が別なので解決しない。
+  鮮度の確保に加えて **呼び出し側で repo_root を明示する**こと。
+
+有効な呼び出し例:
+```
+review(action="context", repo_root="/home/nabu_dvl/workspace/OCR_app/medical_exp_deduction_calc",
+       changed_files=[<PR の変更ファイル>], max_depth=1, include_source=false)
+query(action="impact", repo_root="/home/nabu_dvl/workspace/OCR_app/medical_exp_deduction_calc", ...)
+```
 
 ### グラフの鮮度
 
@@ -411,7 +438,7 @@ gives you structural context (callers, dependents, test coverage) that file sear
 
 ### 役割の使い分け（レビュー時の順序）
 
-1. 変更範囲の把握: `review(action="context")`（明示 `changed_files` + 小さい深さ）
+1. 変更範囲の把握: `review(action="context")`（`repo_root` 明示 + `changed_files` 明示 + 小さい深さ）
 2. 逆依存の確定: `search_files` で import を grep（TSX は graph が弱い）
 3. 単一シンボルの定義・参照: Serena（`find_referencing_symbols`）
 4. 結論はソース（`git diff origin/main...HEAD -- <path>` と該当ファイルの読解）で検証する

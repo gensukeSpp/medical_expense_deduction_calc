@@ -1,0 +1,125 @@
+{# 一覧断片（htmx swap 対象）。 Issue #54 #}
+{# 注意: HTML は form の入れ子を禁じているため、フィルタ用 form と表（行ごとの入力）は兄弟要素にする #}
+
+{# 月ナビゲーション（データ中に存在する月のみ）。現在の sort / 選択氏名を保って遷移する #}
+<nav>
+    {% if months %}
+        {% if prev_month %}
+            <a href="/list?month={{ prev_month }}&sort={{ sort }}{% for name in selected_names %}&names={{ name|urlencode }}{% endfor %}">&laquo; {{ prev_month }}</a>
+        {% endif %}
+        <strong>表示中: {{ month }}</strong>
+        {% if next_month %}
+            <a href="/list?month={{ next_month }}&sort={{ sort }}{% for name in selected_names %}&names={{ name|urlencode }}{% endfor %}">{{ next_month }} &raquo;</a>
+        {% endif %}
+        <p>
+            {% for m in months %}
+                <a href="/list?month={{ m }}&sort={{ sort }}{% for name in selected_names %}&names={{ name|urlencode }}{% endfor %}"
+                   {% if m == month %}style="font-weight: bold;"{% endif %}>{{ m }}</a>
+            {% endfor %}
+        </p>
+        <a href="/list?month={{ month }}&sort={{ sort }}{% for name in selected_names %}&names={{ name|urlencode }}{% endfor %}&unprocessed=1" {% if unprocessed %}style="font-weight: bold; color: #666;"{% endif %}>レシート未修正</a>
+    {% else %}
+        <strong>表示中: {{ month }}</strong>
+        <p>データがありません</p>
+    {% endif %}
+</nav>
+
+{# 日付不明の行がある場合は別枠で表示 #}
+{% if date_missing_count > 0 or unprocessed %}
+{% if unprocessed %}
+<div id="unprocessed-notice">
+    <h4>レシート未修正 {{ date_missing_count }} 件</h4>
+    <p>（日付が不明のため控除対象外）</p>
+</div>
+{% else %}
+<div id="date-missing-notice">
+    <h4>日付不明 {{ date_missing_count }} 件</h4>
+    <p>（控除対象外）</p>
+</div>
+{% endif %}
+
+<div id="unprocessed-rows">
+    {% if unprocessed %}
+        {% for row in date_missing_rows %}
+        <div class="unprocessed-row">
+            <span>{{ row.date }}</span>
+            <td>{{ row.clinic }}</td>
+            <td>{{ row.name }}</td>
+            <td>{{ row.amount }}</td>
+            <td>{{ row.compensation }}</td>
+        </div>
+        {% endfor %}
+    {% else %}
+        <p>表示するデータがありません</p>
+    {% endif %}
+</div>
+{% endif %}
+
+{# 氏名フィルタ（チェックボックスの change で再描画）。表の兄弟要素 #}
+<form id="list-state"
+      hx-get="/list/table"
+      hx-target="#list-table-region"
+      hx-swap="innerHTML"
+      hx-trigger="change">
+    <fieldset>
+        <legend>氏名で絞り込み</legend>
+        {% for name in available_names %}
+        <label>
+            <input type="checkbox" name="names" value="{{ name }}"
+                   {% if name in selected_names %}checked{% endif %}>
+            {{ name }}
+        </label>
+        {% endfor %}
+        {% if not available_names %}
+        <span>氏名のデータがありません</span>
+        {% endif %}
+    </fieldset>
+    <input type="hidden" name="month" value="{{ month }}">
+    <input type="hidden" name="sort" value="{{ sort }}">
+</form>
+
+<table border="1">
+    <thead>
+        <tr>
+            <th>
+                日付
+                {# 昇順/降順トグル。状態を hx-vals で明示して古い値が混入しないようにする #}
+                <button type="button"
+                        hx-get="/list/table"
+                        hx-target="#list-table-region"
+                        hx-swap="innerHTML"
+                        hx-vals='{{ {
+                            "month": month,
+                            "sort": "desc" if sort == "asc" else "asc",
+                            "names": selected_names,
+                        } | tojson }}'>
+                    {% if sort == 'asc' %}▲{% else %}▼{% endif %}
+                </button>
+            </th>
+            <th>クリニック名(調剤薬局名)</th>
+            <th>氏名</th>
+            <th>金額</th>
+            <th>保険で補填した額</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for row in rows %}
+        <tr>
+            <td>{{ row.date }}</td>
+            <td>{{ row.clinic }}</td>
+            <td>{{ row.name }}</td>
+            <td>{{ row.amount }}</td>
+            <td>
+                <input type="text" name="compensation" value="{{ row.compensation }}" size="8"
+                       hx-put="/list/items/{{ row.file_stem }}/compensation"
+                       hx-trigger="change"
+                       hx-target="#list-table-region"
+                       hx-swap="innerHTML"
+                       hx-include="#list-state">
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<p><strong>今月の合計: {{ total }} 円</strong></p>

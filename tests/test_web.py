@@ -131,6 +131,37 @@ def test_correction_updates_json_only(client):
     assert parse_html_content(response.text, "山田 花子")
 
 
+def test_list_table_keeps_comma_in_name_filter(tmp_path):
+    """氏名にカンマが含まれていても、選択値が分裂せずフィルタが動く"""
+    out_dir = tmp_path / "output_json"
+    out_dir.mkdir()
+    write_json_atomic(
+        out_dir / "receipt-001-structured_data.json",
+        {"name": "鈴木, 花子", "clinic": "あおばクリニック", "amount": 1200, "date": "2026-01-03"},
+    )
+    app = create_app(output_dir=str(out_dir), db_path=None)
+    with TestClient(app) as client:
+        response = client.get(
+            "/list/table",
+            params={"month": "2026-01", "sort": "asc", "names": "鈴木, 花子"},
+        )
+        assert response.status_code == 200
+        assert "鈴木, 花子" in response.text
+        assert "1200" in response.text
+
+
+def test_list_multiple_names_via_query(tmp_path):
+    """複数の names パラメータでも、カンマ連結の古いクエリを安全に処理する"""
+    out_dir = tmp_path / "output_json"
+    out_dir.mkdir()
+    write_json_atomic(out_dir / "a-structured_data.json", {"name": "山田", "clinic": "A", "amount": 1000, "date": "2026-01-01"})
+    write_json_atomic(out_dir / "b-structured_data.json", {"name": "鈴木", "clinic": "B", "amount": 2000, "date": "2026-01-02"})
+    app = create_app(output_dir=str(out_dir), db_path=None)
+    with TestClient(app) as client:
+        resp = client.get("/list/table?month=2026-01&names=%E5%B1%B1%E7%94%B0%2C%E9%88%B4%E6%9C%A8")
+        assert "今月の合計: 3000 円" in resp.text
+
+
 def test_correction_multiple_fields(client):
     """一度のリクエストで複数フィールド（例: amount + date）を修正する"""
     # 修正実行
@@ -538,3 +569,131 @@ def test_admin_keeps_date_basis_after_correction_on_date_template(temp_db, tmp_p
     template = get_latest_template_by_clinic(temp_db, clinic_id)
     assert (template or {}).get("coord_basis") == "date"  # 基底は date のまま（topmost へ戻さない）
     assert (template or {}).get("coords_corrections") == before_coords  # anchor 未解決のため座標は書かない
+
+
+# --- Issue #54: 月別一覧（計算）---
+
+
+def test_index_links_to_list_page(client):
+    """トップページから一覧ページへ遷移できる"""
+    response = client.get("/")
+    assert response.status_code == 200
+    assert 'href="/list"' in response.text
+
+
+def test_list_month_total_matches_fixture(client):
+    """補填額なし: 2026-01 の合計は receipt-001 の 3800 円"""
+    response = client.get("/list?month=2026-01")
+    assert response.status_code == 200
+    assert "今月の合計: 3800 円" in response.text
+    assert "あおばクリニック" in response.text
+    assert "山田 太郎" in response.text
+    assert "保険で補填した額" in response.text
+    assert 'name="compensation"' in response.text
+
+
+def test_list_table_partial_htmx(client):
+    """GET /list/table は断片のみを返す"""
+    response = client.get("/list/table?month=2026-01")
+    assert response.status_code == 200
+    assert "今月の合計: 3800 円" in response.text
+    assert "<html" not in response.text.lower()
+
+
+def test_list_acceptance_row_level_compensation(tmp_path):
+    """受け入れ要件2: 行単位で補填し、負にならない。
+    行A 5000/補填6000->0、行B 3000/補填0->3000 のとき合計 3000。
+    """
+    out_dir = tmp_path / "output_json"
+    out_dir.mkdir()
+    write_json_atomic(
+        out_dir / "a-structured_data.json",
+        {"name": "山田", "clinic": "A", "amount": 5000, "date": "2026-01-01"},
+    )
+    write_json_atomic(
+        out_dir / "b-structured_data.json",
+        {"name": "鈴木", "clinic": "B", "amount": 3000, "date": "2026-01-02"},
+    )
+
+    app = create_app(output_dir=str(out_dir), db_path=None)
+    with TestClient(app) as client:
+        # 行A に 6000 を補填 -> 行は 0、合計は 3000 のまま（8000-6000=2000 にならない）
+        resp = client.put(
+            "/list/items/a/compensation",
+            data={"month": "2026-01", "sort": "asc", "compensation": "6000"},
+        )
+        assert resp.status_code == 200
+        assert "今月の合計: 3000 円" in resp.text
+        # JSON に永続化されている
+        import json
+
+        saved = json.loads((out_dir / "a-structured_data.json").read_text(encoding="utf-8"))
+        assert saved["compensation"] == 6000
+
+
+def test_list_name_filter_updates_total(tmp_path):
+    """受け入れ要件1: 氏名選択で合計が動的に変わる"""
+    out_dir = tmp_path / "output_json"
+    out_dir.mkdir()
+    write_json_atomic(
+        out_dir / "a-structured_data.json",
+        {"name": "山田", "clinic": "A", "amount": 1000, "date": "2026-01-01"},
+    )
+    write_json_atomic(
+        out_dir / "b-structured_data.json",
+        {"name": "鈴木", "clinic": "B", "amount": 2000, "date": "2026-01-02"},
+    )
+
+    app = create_app(output_dir=str(out_dir), db_path=None)
+    with TestClient(app) as client:
+        all_resp = client.get("/list/table?month=2026-01")
+        assert "今月の合計: 3000 円" in all_resp.text
+        yamada_resp = client.get("/list/table?month=2026-01&names=%E5%B1%B1%E7%94%B0")
+        assert "今月の合計: 1000 円" in yamada_resp.text
+
+
+def test_list_multiple_names_via_query(tmp_path):
+    """複数の names パラメータ（カンマ区切り・重複）にも対応する"""
+    out_dir = tmp_path / "output_json"
+    out_dir.mkdir()
+    write_json_atomic(
+        out_dir / "a-structured_data.json",
+        {"name": "山田", "clinic": "A", "amount": 1000, "date": "2026-01-01"},
+    )
+    write_json_atomic(
+        out_dir / "b-structured_data.json",
+        {"name": "鈴木", "clinic": "B", "amount": 2000, "date": "2026-01-02"},
+    )
+
+    app = create_app(output_dir=str(out_dir), db_path=None)
+    with TestClient(app) as client:
+        resp = client.get("/list/table?month=2026-01&names=%E5%B1%B1%E7%94%B0%2C%E9%88%B4%E6%9C%A8")
+        assert "今月の合計: 3000 円" in resp.text
+
+
+def test_list_compensation_not_found(tmp_path):
+    """存在しないレシートの補填額保存は 404"""
+    out_dir = tmp_path / "output_json"
+    out_dir.mkdir()
+    app = create_app(output_dir=str(out_dir), db_path=None)
+    with TestClient(app) as client:
+        resp = client.put("/list/items/nope/compensation", data={"compensation": "100"})
+        assert resp.status_code == 404
+
+
+def test_list_detail_edit_keeps_compensation(tmp_path):
+    """既存の詳細修正は compensation を上書きせず保持する"""
+    out_dir = tmp_path / "output_json"
+    out_dir.mkdir()
+    write_json_atomic(
+        out_dir / "r-structured_data.json",
+        {"name": "山田", "clinic": "A", "amount": 5000, "date": "2026-01-01", "compensation": 1000},
+    )
+    app = create_app(output_dir=str(out_dir), db_path=None)
+    with TestClient(app) as client:
+        resp = client.put("/r", json={"amount": 6000})
+        assert resp.status_code == 200
+        import json
+
+        saved = json.loads((out_dir / "r-structured_data.json").read_text(encoding="utf-8"))
+        assert saved["compensation"] == 1000
