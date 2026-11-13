@@ -72,6 +72,8 @@
 | 20 | `test_list_month_total_matches_fixture` | 既存フィクスチャで 2026-01 の合計 3800 円を表示 |
 | 21 | `test_list_acceptance_row_level_compensation` | **受け入れ要件2**。行A に 6000 補填→行は 0、合計は行B の 3000 のまま（2000 にならない） |
 | 22 | `test_list_name_filter_updates_total` | **受け入れ要件1**。断片 `/list/table` で氏名絞り込み→合計が 1000 円に変わる |
+| 23 | `test_list_name_filter_keeps_comma_name` | 氏名にカンマが含まれる場合でも選択値が分裂せず、マッチが維持される |
+| 24 | `test_save_compensation_negative_becomes_zero` | 負の補填額を 0 に丸める |
 
 ## エッジケース一覧
 

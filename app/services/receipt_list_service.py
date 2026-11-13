@@ -20,15 +20,24 @@ from app.services.receipt_file_repository import ReceiptFileRepository
 
 
 def _to_amount(value: Any) -> int:
-    """値を整数金額へ変換する。空・不正は 0 扱い。"""
+    """値を整数金額へ変換する。空・不正・負の値は 0 扱い。"""
     if value is None or value == "":
         return 0
     if isinstance(value, bool):
         return 0
-    if isinstance(value, int):
-        return value
-    parsed = parse_amount(str(value))
-    return parsed if parsed is not None else 0
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+
+    text = str(value).strip()
+    if not text:
+        return 0
+    if text.startswith("-"):
+        return 0
+
+    parsed = parse_amount(text)
+    if parsed is None:
+        return 0
+    return max(0, parsed)
 
 
 class ReceiptListService:
@@ -41,12 +50,18 @@ class ReceiptListService:
         self.output_dir = Path(output_dir)
         self.file_repo = ReceiptFileRepository(self.output_dir)
 
-    def load_rows(self) -> List[ReceiptRow]:
+    def load_rows(self) -> tuple[List[ReceiptRow], List[ReceiptRow]]:
         """全 structured_data を読み込み ReceiptRow リストにする。
+
+        戻り値:
+            (normal_rows, date_missing_rows)
+            - normal_rows: 日付がある行
+            - date_missing_rows: 日付がない行（「日付不明」として表示）
 
         1ファイルの読み込み失敗はスキップする（既存 get_all_receipts と同様）。
         """
-        rows: List[ReceiptRow] = []
+        normal_rows: List[ReceiptRow] = []
+        date_missing_rows: List[ReceiptRow] = []
         for path in self.file_repo.find_all_receipt_files():
             stem = path.stem.replace("-structured_data", "")
             try:
@@ -55,18 +70,29 @@ class ReceiptListService:
                 continue
             date_str = str(data.get("date") or "")
             if parse_date(date_str) is None:
-                date_str = ""
-            rows.append(
-                ReceiptRow(
-                    file_stem=stem,
-                    date=date_str,
-                    clinic=str(data.get("clinic") or ""),
-                    name=str(data.get("name") or ""),
-                    amount=_to_amount(data.get("amount")),
-                    compensation=_to_amount(data.get("compensation")),
+                # 日付が不明の行は date_missing として扱う
+                date_missing_rows.append(
+                    ReceiptRow(
+                        file_stem=stem,
+                        date="",
+                        clinic=str(data.get("clinic") or ""),
+                        name=str(data.get("name") or ""),
+                        amount=_to_amount(data.get("amount")),
+                        compensation=_to_amount(data.get("compensation")),
+                    )
                 )
-            )
-        return rows
+            else:
+                normal_rows.append(
+                    ReceiptRow(
+                        file_stem=stem,
+                        date=date_str,
+                        clinic=str(data.get("clinic") or ""),
+                        name=str(data.get("name") or ""),
+                        amount=_to_amount(data.get("amount")),
+                        compensation=_to_amount(data.get("compensation")),
+                    )
+                )
+        return normal_rows, date_missing_rows
 
     def get_page_context(
         self,
@@ -82,13 +108,17 @@ class ReceiptListService:
             names: 選択された氏名リスト（空なら全件）。
 
         Returns:
-            rows / total / months / available_names / selected_names / month / sort /
-            prev_month / next_month を含む dict。
+            month / sort / rows / total / months / available_names /
+            selected_names / prev_month / next_month / date_missing_count
+            を含む dict。
+            - rows: 表示対象月の正常な行のみ
+            - total: 正常な行の控除額合計
+            - date_missing_count: 日付不明の件数（表示用）
         """
-        rows = self.load_rows()
-        months = collect_months(rows)
+        normal_rows, date_missing_rows = self.load_rows()
+        months = collect_months(normal_rows)
         current_month = self._resolve_month(month, months)
-        month_rows = [r for r in rows if month_of(r.date) == current_month]
+        month_rows = [r for r in normal_rows if month_of(r.date) == current_month]
         month_rows = filter_by_names(month_rows, names)
         month_rows = sort_by_date(month_rows, ascending=(sort != "desc"))
         return {
@@ -97,10 +127,11 @@ class ReceiptListService:
             "rows": month_rows,
             "total": compute_total(month_rows),
             "months": months,
-            "available_names": available_names(rows),
+            "available_names": available_names(normal_rows),
             "selected_names": list(names) if names else [],
             "prev_month": self._neighbor_month(months, current_month, -1),
             "next_month": self._neighbor_month(months, current_month, 1),
+            "date_missing_count": len(date_missing_rows),
         }
 
     def save_compensation(self, file_stem: str, value: Any) -> None:

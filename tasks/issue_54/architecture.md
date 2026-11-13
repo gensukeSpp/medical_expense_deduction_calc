@@ -70,8 +70,8 @@ graph TD
 - 戻り値: `list.html`（全文）。内部で `list_table.html` を include
 
 ### `GET /list/table` — htmx 断片
-- 同一クエリ。ただし断片のみ返す → 氏名チェックボックス変更時に
-  `<form hx-get="/list/table" hx-target="#list-table-region" hx-include="closest form">` で該当領域だけ差し替え
+- 同一クエリ。ただし断片のみ返す → 氏名チェックボックス変更時に `#list-state` 形式の form を使い、`hx-include="#list-state"` と `hx-target="#list-table-region"` で該当領域だけ差し替え
+- `names` はカンマ連結ではなく `names` の複数パラメータを送る（氏名自体にカンマが含まれても壊れない設計）
 
 ### `PUT /list/items/{file_stem}/compensation` — 補填額保存（htmx）
 - フォーム値: `month`, `sort`, `names`, `compensation`（1行分）
@@ -81,8 +81,8 @@ graph TD
 ## htmx の利用方式
 
 - CDN: `<script src="https://unpkg.com/htmx.org@1.9.12"></script>`（`detail.html` と同一。新規依存なし）
-- 氏名チェックボックス: フォームの `hx-get="/list/table"` + `hx-target="#list-table-region"` + `hx-swap="innerHTML"`。`hx-include="closest form"` で month/sort/names を送る
-- 補填額入力欄: 各行の `<input name="compensation">` に `hx-put` + `hx-include="closest form"` + `hx-target="#list-table-region"`。サーバは断片を返して再計算
+- 氏名チェックボックス: フォームの `hx-get="/list/table"` + `hx-target="#list-table-region"` + `hx-swap="innerHTML"`。直接 `#list-state` を `hx-include` し、ネスト form を避けた設計で month/sort/names を送る
+- 補填額入力欄: 各行の `<input name="compensation">` に `hx-put` + `hx-include="#list-state"` + `hx-target="#list-table-region"`。サーバは断片を返して再計算
 - 月ナビゲーション: 通常リンク（`/list?month=...`）。サーバ側で前月・翌月を算出
 
 ## データ項目（structured_data.json → 一覧）

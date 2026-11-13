@@ -5,33 +5,58 @@
 <nav>
     {% if months %}
         {% if prev_month %}
-            <a href="/list?month={{ prev_month }}&sort={{ sort }}&names={{ selected_names|join(',')|urlencode }}">&laquo; {{ prev_month }}</a>
+            <a href="/list?month={{ prev_month }}&sort={{ sort }}{% for name in selected_names %}&names={{ name|urlencode }}{% endfor %}">&laquo; {{ prev_month }}</a>
         {% endif %}
         <strong>表示中: {{ month }}</strong>
         {% if next_month %}
-            <a href="/list?month={{ next_month }}&sort={{ sort }}&names={{ selected_names|join(',')|urlencode }}">{{ next_month }} &raquo;</a>
+            <a href="/list?month={{ next_month }}&sort={{ sort }}{% for name in selected_names %}&names={{ name|urlencode }}{% endfor %}">{{ next_month }} &raquo;</a>
         {% endif %}
         <p>
             {% for m in months %}
-                <a href="/list?month={{ m }}&sort={{ sort }}&names={{ selected_names|join(',')|urlencode }}"
+                <a href="/list?month={{ m }}&sort={{ sort }}{% for name in selected_names %}&names={{ name|urlencode }}{% endfor %}"
                    {% if m == month %}style="font-weight: bold;"{% endif %}>{{ m }}</a>
             {% endfor %}
         </p>
+        <a href="/list?month={{ month }}&sort={{ sort }}{% for name in selected_names %}&names={{ name|urlencode }}{% endfor %}&unprocessed=1" {% if unprocessed %}style="font-weight: bold; color: #666;"{% endif %}>レシート未修正</a>
     {% else %}
         <strong>表示中: {{ month }}</strong>
         <p>データがありません</p>
     {% endif %}
 </nav>
 
-{# 現在の表示状態（month / sort / 選択中の氏名）。行ごとの補填額保存時に include する #}
-<div id="list-state">
-    <input type="hidden" name="month" value="{{ month }}">
-    <input type="hidden" name="sort" value="{{ sort }}">
-    <input type="hidden" name="names" value="{{ selected_names|join(',') }}">
+{# 日付不明の行がある場合は別枠で表示 #}
+{% if date_missing_count > 0 or unprocessed %}
+{% if unprocessed %}
+<div id="unprocessed-notice">
+    <h4>レシート未修正 {{ date_missing_count }} 件</h4>
+    <p>（日付が不明のため控除対象外）</p>
 </div>
+{% else %}
+<div id="date-missing-notice">
+    <h4>日付不明 {{ date_missing_count }} 件</h4>
+    <p>（控除対象外）</p>
+</div>
+{% endif %}
+
+<div id="unprocessed-rows">
+    {% if unprocessed %}
+        {% for row in date_missing_rows %}
+        <div class="unprocessed-row">
+            <span>{{ row.date }}</span>
+            <td>{{ row.clinic }}</td>
+            <td>{{ row.name }}</td>
+            <td>{{ row.amount }}</td>
+            <td>{{ row.compensation }}</td>
+        </div>
+        {% endfor %}
+    {% else %}
+        <p>表示するデータがありません</p>
+    {% endif %}
+</div>
+{% endif %}
 
 {# 氏名フィルタ（チェックボックスの change で再描画）。表の兄弟要素 #}
-<form id="name-filter"
+<form id="list-state"
       hx-get="/list/table"
       hx-target="#list-table-region"
       hx-swap="innerHTML"
@@ -58,7 +83,7 @@
         <tr>
             <th>
                 日付
-                {# 昇順/降順トグル。状態を hx-vals で明示して古价格在混入しないようにする #}
+                {# 昇順/降順トグル。状態を hx-vals で明示して古い値が混入しないようにする #}
                 <button type="button"
                         hx-get="/list/table"
                         hx-target="#list-table-region"
@@ -66,7 +91,7 @@
                         hx-vals='{{ {
                             "month": month,
                             "sort": "desc" if sort == "asc" else "asc",
-                            "names": selected_names|join(","),
+                            "names": selected_names,
                         } | tojson }}'>
                     {% if sort == 'asc' %}▲{% else %}▼{% endif %}
                 </button>

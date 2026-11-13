@@ -24,8 +24,17 @@ def parse_amount(text: str) -> Optional[int]:
     """Parse a Japanese-style amount string into integer JPY.
     Returns None if parsing fails.
     Examples: '3,800円' -> 3800, '一万二千円' -> 12000
+
+    Negative values are treated as invalid for receipt amounts and return None so callers
+    can normalize them to 0 or reject them explicitly.
     """
     if not text:
+        return None
+
+    t = str(text).strip()
+    if not t:
+        return None
+    if "-" in t or "−" in t:
         return None
 
     # normalize fullwidth digits and punctuation to ascii

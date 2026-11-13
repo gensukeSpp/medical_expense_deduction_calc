@@ -4,6 +4,7 @@ from fastapi.templating import Jinja2Templates
 from pathlib import Path
 from typing import Any, Iterable
 
+from app.calc import available_names
 from app.services.receipt_service import ReceiptService
 from app.services.receipt_list_service import ReceiptListService
 from app.services.template_admin_service import (
@@ -16,21 +17,29 @@ from app.services.template_admin_service import (
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
 
-def _parse_names(values: Iterable[Any]) -> list[str]:
-    """氏名リストを正規化する（カンマ区切り文字列と複数パラメータの両方に対応）。
+def _parse_names(values: Iterable[Any], known_names: Iterable[str] | None = None) -> list[str]:
+    """氏名リストを正規化する。
 
-    Args:
-        values: クエリ／フォームから取得した氏名の値リスト。
-
-    Returns:
-        重複を除いた氏名リスト。
+    互換性のため、古い `?names=山田,鈴木` のような壊れたクエリは複数氏名として
+    解釈する。ただし `鈴木, 花子` のように実際の氏名そのものにカンマが含まれる
+    値は、既知の氏名一覧と一致する場合は分割しない。
     """
+    known = {name.strip() for name in (known_names or []) if name and str(name).strip()}
     names: list[str] = []
     for value in values:
-        for part in str(value).split(","):
-            part = part.strip()
-            if part and part not in names:
-                names.append(part)
+        if value is None:
+            continue
+        raw = str(value).strip()
+        if not raw:
+            continue
+        split_values = [part.strip() for part in raw.split(",") if part.strip()]
+        if len(split_values) > 1 and raw not in known:
+            for part in split_values:
+                if part and part not in names:
+                    names.append(part)
+            continue
+        if raw not in names:
+            names.append(raw)
     return names
 
 
@@ -61,22 +70,39 @@ def create_app(output_dir: str = "output_json", db_path: str | None = None) -> F
         """一覧ページ用サービス（JSON のみ参照、DB 不要）"""
         return ReceiptListService(output_dir)
 
-    async def _list_context(request: Request, service: ReceiptListService) -> dict:
+    async def _list_context(request: Request, service: ReceiptListService, unprocessed: bool = False) -> dict:
         """クエリ（GET）とフォーム（PUT）の双方から一覧の文脈を構築する。
 
         htmx は include した値をフォーム形式で送るため、PUT では query_params が空になる。
         """
+        normal_rows, date_missing_rows = service.load_rows()
+        known_names = set()
+        for row in normal_rows + date_missing_rows:
+            if row.name:
+                known_names.add(row.name)
+
         if request.method == "GET":
             params = request.query_params
             month = params.get("month", "")
             sort = params.get("sort", "asc")
-            names = _parse_names(params.getlist("names"))
+            names = _parse_names(params.getlist("names"), known_names)
+            unprocessed = params.get("unprocessed", "").lower() == "true"
         else:
             form = await request.form()
             month = str(form.get("month", ""))
             sort = str(form.get("sort", "asc"))
-            names = _parse_names(form.getlist("names"))
-        return service.get_page_context(month, sort, names)
+            names = _parse_names(form.getlist("names"), known_names)
+            unprocessed = False
+        ctx = service.get_page_context(month, sort, names)
+        ctx["unprocessed"] = unprocessed
+        if unprocessed:
+            normal_rows, date_missing_rows = service.load_rows()
+            ctx["date_missing_count"] = len(date_missing_rows)
+            ctx["date_missing_rows"] = date_missing_rows
+        else:
+            ctx["date_missing_count"] = 0
+            ctx["date_missing_rows"] = []
+        return ctx
 
     @app.get("/list", response_class=HTMLResponse)
     async def receipt_list_page(

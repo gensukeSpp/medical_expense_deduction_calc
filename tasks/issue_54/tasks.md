@@ -19,6 +19,9 @@ graph LR
 
 コミットは各 Task 末尾に `feat #54: <任意の1行説明>`。
 
+> 注: この文書は実装の最終形を反映した記録であり、実装途中の古い `closest form` 前提や `names` のカンマ連結設計は更新済み。最終実装では `#list-state` と `hx-include="#list-state"` で兄弟要素として状態を扱う。
+> `names` は複数パラメータとして送信し、サーバは `form.getlist("names")` / `params.getlist("names")` を正規化する。
+>
 > 注: 新規 `tests/test_calc.py` は .gitignore の `test_*.py` の影響を受ける可能性がある。
 > `git status --short tests/test_calc.py` で `??` なら通常 `git add`、`path ignored` なら `git add -f` を使う。
 

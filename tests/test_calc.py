@@ -12,6 +12,7 @@ from app.calc import (
     month_of,
     sort_by_date,
 )
+from app.normalization import parse_amount
 
 # --- compute_contribution (受け入れ要件2の核心) ---
 
@@ -34,6 +35,13 @@ def test_contribution_exact_equal_is_zero():
 def test_contribution_no_compensation():
     """補填額なし(0)は金額そのまま"""
     assert compute_contribution(3000, 0) == 3000
+
+
+def test_parse_amount_rejects_negative_values():
+    """負の金額は解析不能として扱い、補填額ロジックで 0 に丸める"""
+    assert parse_amount("-500円") is None
+    assert parse_amount("-500") is None
+    assert parse_amount("−500円") is None
 
 
 # --- compute_total: 行ごとに控除し、月合計へ逆算しない ---
@@ -139,10 +147,11 @@ def test_load_rows_reads_structured_files(tmp_path):
     out.mkdir()
     _write_sample(out, "r1", {"name": "山田", "clinic": "あおば", "amount": 5000, "date": "2026-01-15"})
     service = ReceiptListService(out)
-    rows = service.load_rows()
-    assert len(rows) == 1
-    assert rows[0].file_stem == "r1"
-    assert rows[0].amount == 5000
+    normal_rows, date_missing_rows = service.load_rows()
+    assert len(normal_rows) == 1
+    assert normal_rows[0].file_stem == "r1"
+    assert normal_rows[0].amount == 5000
+    assert len(date_missing_rows) == 0
 
 
 def test_get_page_context_filters_and_totals(tmp_path):
@@ -195,6 +204,28 @@ def test_save_compensation_blank_becomes_zero(tmp_path):
     assert data["compensation"] == 0
 
 
+def test_save_compensation_negative_becomes_zero(tmp_path):
+    out = tmp_path / "output_json"
+    out.mkdir()
+    _write_sample(out, "a", {"name": "山田", "clinic": "A", "amount": 5000, "date": "2026-01-01"})
+    service = ReceiptListService(out)
+    service.save_compensation("a", "-500")
+    data = service.file_repo.load_receipt("a")
+    assert data["compensation"] == 0
+
+
+def test_get_page_context_filters_comma_names_without_split(tmp_path):
+    out = tmp_path / "output_json"
+    out.mkdir()
+    _write_sample(out, "a", {"name": "鈴木, 花子", "clinic": "A", "amount": 1200, "date": "2026-01-03"})
+    _write_sample(out, "b", {"name": "山田 太郎", "clinic": "A", "amount": 2000, "date": "2026-01-04"})
+    service = ReceiptListService(out)
+    ctx = service.get_page_context("2026-01", "asc", ["鈴木, 花子"])
+    assert ctx["selected_names"] == ["鈴木, 花子"]
+    assert [r.file_stem for r in ctx["rows"]] == ["a"]
+    assert ctx["total"] == 1200
+
+
 def test_save_compensation_keeps_other_fields(tmp_path):
     """補填額保存は他のフィールドを壊さない"""
     out = tmp_path / "output_json"
@@ -206,3 +237,17 @@ def test_save_compensation_keeps_other_fields(tmp_path):
     assert data["name"] == "山田"
     assert data["amount"] == 5000
     assert data["date"] == "2026-01-01"
+
+
+def test_get_page_context_date_missing_count(tmp_path):
+    """日付不明の行があるとき、date_missing_count がセットされること"""
+    out = tmp_path / "output_json"
+    out.mkdir()
+    _write_sample(out, "a", {"name": "山田", "clinic": "A", "amount": 5000, "date": "2026-01-01"})
+    _write_sample(out, "b", {"name": "鈴木", "clinic": "B", "amount": 3000, "date": ""})  # date missing
+    service = ReceiptListService(out)
+    ctx = service.get_page_context("2026-01", "asc", [])
+    assert ctx["total"] == 5000  # only 山田 is in 2026-01, compensation=0
+    assert ctx["date_missing_count"] == 1  # 鈴木の日付不明
+    assert len(ctx["rows"]) == 1
+    assert ctx["rows"][0].file_stem == "a"

@@ -131,6 +131,37 @@ def test_correction_updates_json_only(client):
     assert parse_html_content(response.text, "山田 花子")
 
 
+def test_list_table_keeps_comma_in_name_filter(tmp_path):
+    """氏名にカンマが含まれていても、選択値が分裂せずフィルタが動く"""
+    out_dir = tmp_path / "output_json"
+    out_dir.mkdir()
+    write_json_atomic(
+        out_dir / "receipt-001-structured_data.json",
+        {"name": "鈴木, 花子", "clinic": "あおばクリニック", "amount": 1200, "date": "2026-01-03"},
+    )
+    app = create_app(output_dir=str(out_dir), db_path=None)
+    with TestClient(app) as client:
+        response = client.get(
+            "/list/table",
+            params={"month": "2026-01", "sort": "asc", "names": "鈴木, 花子"},
+        )
+        assert response.status_code == 200
+        assert "鈴木, 花子" in response.text
+        assert "1200" in response.text
+
+
+def test_list_multiple_names_via_query(tmp_path):
+    """複数の names パラメータでも、カンマ連結の古いクエリを安全に処理する"""
+    out_dir = tmp_path / "output_json"
+    out_dir.mkdir()
+    write_json_atomic(out_dir / "a-structured_data.json", {"name": "山田", "clinic": "A", "amount": 1000, "date": "2026-01-01"})
+    write_json_atomic(out_dir / "b-structured_data.json", {"name": "鈴木", "clinic": "B", "amount": 2000, "date": "2026-01-02"})
+    app = create_app(output_dir=str(out_dir), db_path=None)
+    with TestClient(app) as client:
+        resp = client.get("/list/table?month=2026-01&names=%E5%B1%B1%E7%94%B0%2C%E9%88%B4%E6%9C%A8")
+        assert "今月の合計: 3000 円" in resp.text
+
+
 def test_correction_multiple_fields(client):
     """一度のリクエストで複数フィールド（例: amount + date）を修正する"""
     # 修正実行
