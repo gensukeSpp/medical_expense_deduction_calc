@@ -1,3 +1,4 @@
+import re
 import time
 
 import pytest
@@ -753,6 +754,36 @@ def web_client(tmp_path, web_ctl):
         yield c
 
 
+def test_index_shows_control_panel(web_client):
+    """操作パネル（フォルダ / DB / watch / 前処理 / 画像指定 / 状態バー）が表示される"""
+    resp = web_client.get("/")
+    assert resp.status_code == 200
+    assert "指定フォルダ" in resp.text
+    assert "データベース" in resp.text
+    assert "前処理" in resp.text
+    assert "watch" in resp.text
+    assert "画像指定" in resp.text
+    assert "status-bar" in resp.text
+    assert "clahe+adaptive" in resp.text  # 前処理セレクトの選択肢
+    # 複数ファイル注意書き
+    assert "1枚ずつ" in resp.text
+
+
+def test_config_updates_input_dir_and_mode(web_client, tmp_path):
+    """POST /config で input_dir / preprocess_mode が反映される"""
+    new_dir = tmp_path / "another"
+    resp = web_client.post(
+        "/config",
+        data={"input_dir": str(new_dir), "preprocess_mode": "clahe"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/"
+    page = web_client.get("/")
+    assert str(new_dir) in page.text
+    assert 'value="clahe" selected' in page.text
+
+
 def test_config_rejects_unknown_mode(web_client):
     resp = web_client.post("/config", data={"preprocess_mode": "bogus"})
     assert resp.status_code == 400
@@ -875,3 +906,49 @@ def test_watch_picks_up_uploaded_image(web_client, web_ctl):
     page = web_client.get("/")
     assert "IMG_002" in page.text  # 一覧にリンクが追加されている
     web_client.post("/watch/stop", follow_redirects=False)
+
+
+# --- Issue #56: index.html 表示（操作パネル / 状態バー / ポーリング JS） ---
+
+
+def test_file_input_disabled_while_processing(web_client, web_ctl):
+    """処理中は <input type='file'> が disabled になる（受け入れ要件 3）"""
+    web_ctl._is_processing = True
+    try:
+        page = web_client.get("/")
+        m = re.search(r'<input id="image-input"[^>]*>', page.text)
+        assert m is not None, "image-input タグが見つからない"
+        assert "disabled" in m.group(0)
+    finally:
+        web_ctl._is_processing = False
+
+
+def test_file_input_enabled_after_processing(web_client, web_ctl):
+    """処理完了後は disabled が外れる（watch 状態は維持）"""
+    page = web_client.get("/")
+    m = re.search(r'<input id="image-input"[^>]*>', page.text)
+    assert m is not None
+    assert "disabled" not in m.group(0)
+
+
+def test_index_shows_db_unselected_hint(tmp_path):
+    """DB 未選択時は「未選択」表示（エラー誘導）"""
+    from app.services.watch_controller import WatchController
+
+    ctl = WatchController(
+        input_dir=str(tmp_path / "input"),
+        output_dir=str(tmp_path / "output_json"),
+        scan_fn=lambda *a, **k: 0,
+        ocr_factory=lambda: object(),
+    )
+    app = create_app(output_dir=str(tmp_path / "output_json"), controller=ctl)
+    with TestClient(app) as c:
+        page = c.get("/")
+        assert "未選択" in page.text
+
+
+def test_index_has_status_poll_script(web_client):
+    """ページに /api/status のポーリング JS が含まれる"""
+    page = web_client.get("/")
+    assert "/api/status" in page.text
+    assert "pollStatus" in page.text

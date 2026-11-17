@@ -1,12 +1,94 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
+    <meta charset="UTF-8">
     <title>抽出データ一覧</title>
+    <script>
+        let prevProcessing = {{ 'true' if ctl.is_processing else 'false' }};
+        async function pollStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const s = await res.json();
+                const bar = document.getElementById('status-bar');
+                const imgInput = document.getElementById('image-input');
+                const submitBtn = document.getElementById('image-submit');
+                if (bar) {
+                    bar.textContent = 'watch: ' + (s.watch_on ? 'ON' : 'OFF')
+                        + ' / process: ' + (s.is_processing ? '実行中' : '待機中')
+                        + (s.last_error ? ' / エラー: ' + s.last_error : '');
+                }
+                if (imgInput) { imgInput.disabled = s.is_processing; }
+                if (submitBtn) { submitBtn.disabled = s.is_processing; }
+                if (prevProcessing && !s.is_processing) {
+                    location.reload();
+                    return;
+                }
+                prevProcessing = s.is_processing;
+            } catch (e) {
+                // サーバ停止中などは何もしない（次回ポーリングで復帰）
+            }
+            setTimeout(pollStatus, 2000);
+        }
+        pollStatus();
+    </script>
 </head>
 <body>
     <h1>抽出データ一覧</h1>
     <p><a href="/admin/templates">テンプレート管理</a></p>
     <p><a href="/list">月別一覧（計算）</a></p>
+
+    <!-- 操作パネル (Issue #56): 一覧の上部 -->
+    <div id="control-panel" style="border:1px solid #ccc; padding:12px; margin-bottom:12px;">
+        <form method="post" action="/config" enctype="multipart/form-data" style="margin-bottom:8px;">
+            <label>指定フォルダ:
+                <input type="text" name="input_dir" value="{{ ctl.input_dir }}" size="50">
+            </label>
+            <button type="submit">変更</button>
+            <br>
+            <label>前処理:
+                <select name="preprocess_mode">
+                    {% for m in ['none', 'clahe', 'adaptive', 'clahe+adaptive'] %}
+                    <option value="{{ m }}" {% if ctl.preprocess_mode == m %}selected{% endif %}>{{ m }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <br>
+            <label>データベース:
+                <input type="file" name="db_file" accept=".db">
+            </label>
+            {% if ctl.has_db %}
+                <span>現在: {{ ctl.db_path }}</span>
+            {% else %}
+                <span style="color:#c00;">未選択</span>
+            {% endif %}
+        </form>
+
+        {% if ctl.watch_on %}
+        <form method="post" action="/watch/stop" style="display:inline;">
+            <button type="submit">watch 停止</button>
+        </form>
+        {% else %}
+        <form method="post" action="/watch/start" style="display:inline;">
+            <button id="watch-btn" type="submit">watch ON</button>
+        </form>
+        {% endif %}
+
+        <form method="post" action="/images" enctype="multipart/form-data" style="margin-top:8px;">
+            <label>画像指定:
+                <input id="image-input" type="file" name="image" accept="image/*"
+                       {% if ctl.is_processing %}disabled{% endif %}>
+            </label>
+            <button id="image-submit" type="submit" {% if ctl.is_processing %}disabled{% endif %}>読み込む</button>
+            <span style="color:#888;">※ 複数ファイルを一度に読み込ませると精度が落ちます。1枚ずつお読み込みください。</span>
+        </form>
+    </div>
+
+    <!-- 状態表示スペース (横いっぱい) -->
+    <div id="status-bar" style="width:100%; border:1px solid #ccc; padding:8px; margin-bottom:12px; box-sizing:border-box;">
+        watch: {{ 'ON' if ctl.watch_on else 'OFF' }} / process: {{ '実行中' if ctl.is_processing else '待機中' }}
+        {% if ctl.last_error %} / エラー: {{ ctl.last_error }}{% endif %}
+    </div>
+
     {% if items %}
         <table border="1">
             <thead>
