@@ -60,8 +60,12 @@ uv run python main.py --serve --port 8000 --db-path data/db.sqlite3
 
 - 起動: `uv run python main.py --serve [--port 8000] [--db-path data/db.sqlite3]`
 - `--serve` では OCR を遅延初期化するため起動が高速。PaddleOCR は初回スキャン時に生成
-- 操作パネル: 指定フォルダ(input_dir) / 前処理(preprocess_mode) / DB アップロード(data/ へ保存)
-- 画像アップロードは指定フォルダへ**コピーのみ**（watch ON のポーリングが処理）
+- 操作パネルは**選択＝確定**（JS fetch で即時適用・画面遷移なし）:
+  - 指定フォルダ: パスを直接入力して「適用」（ブラウザのダイアログからはサーバ側パスが取得できないため）
+  - 前処理: セレクト変更で即適用（`none`/`clahe`/`adaptive`/`clahe+adaptive`）
+  - データベース: ファイル選択で即アップロード（`data/` へ保存 + migration 適用。失敗時はパネル内にエラー表示）
+  - watch ON/OFF ボタン + 状態バー（2秒ポーリングで更新）
+- 画像アップロードは指定フォルダへ**コピーのみ**＋ watch 未 ON なら自動開始（処理は watch のポーリングが実施）
 - watch 開始・画像指定は DB 選択必須（未選択なら 400）
-- 処理中はファイル指定が disabled になり、完了で一覧が自動更新される
+- 処理中はファイル指定が disabled。新しい structured data 生成時に一覧が自動リロード
 - 状態はプロセス内メモリのみ（サーバ再起動でリセット）

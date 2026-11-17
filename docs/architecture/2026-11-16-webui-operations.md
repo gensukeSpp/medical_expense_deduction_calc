@@ -25,7 +25,7 @@ graph TD
 
     CTL --> THREAD
     THREAD --> SCAN
-    IMG --> COPY["copy_image()<br/>input_dir へ保存 (案C: コピーのみ)"]
+    IMG --> COPY["copy_image()<br/>input_dir へ保存 (案C: コピーのみ)<br/>+ watch 未 ON なら自動開始"]
     CONF --> DBUP["save_db_upload()<br/>data/ に保存 → run_migrations"]
 
     SCAN --> PROC["ReceiptProcessor._sync_process<br/>(既存: 安定性/冪等/前処理/正規化/パース)"]
@@ -62,22 +62,24 @@ graph TD
 | `/config` | POST | `input_dir` / `preprocess_mode` / `db_file`（UploadFile）を設定。303 → `/` |
 | `/watch/start` | POST | DB 未選択なら 400。スレッド開始。303 → `/` |
 | `/watch/stop` | POST | スレッド停止。303 → `/` |
-| `/images` | POST | DB 未選択 400 / 処理中 409 / 非画像 400。input_dir へコピーのみ。303 → `/` |
-| `/api/status` | GET | `get_status()` の JSON を返す（JS ポーリング用） |
+| `/images` | POST | DB 未選択 400 / 処理中 409 / 非画像 400。input_dir へコピーのみ＋ watch 未 ON なら自動開始。303 → `/` |
+| `/api/status` | GET | `get_status()` の JSON を返す（JS ポーリング用。`structured_count` = output_dir 内 structured data 数） |
 
 - `GET /` は `{"items": ..., "ctl": controller.get_status()}` を index.html へ
 
 ### 修正: `app/web/templates/index.html`
 
-一覧テーブル上部に操作パネル + 状態バー + インライン JS（約 25 行）:
+一覧テーブル上部に操作パネル + 状態バー + インライン JS。**選択＝確定モデル**（運用フィードバックを反映）:
 
-- `/config` フォーム（指定フォルダ / 前処理 / DB file）
-- `/watch/start`・`/watch/stop` フォーム（watch 状態で出し分け）
-- `/images` フォーム（画像 file input + 注意書き）
-- `#status-bar`（横いっぱい）: watch: ON/OFF / process: 実行中/待機中
-- `pollStatus()` 2秒間隔ポーリング → 状態更新・disabled 制御・完了時 `location.reload()`
+- 指定フォルダ: テキスト入力 + 「適用」ボタン（`/config` へ fetch。ブラウザのダイアログからはサーバ側パスが取得できないため直接入力）
+- 前処理: セレクト変更で即 `/config` fetch（4 択）
+- データベース: ファイル選択で即 `/config` fetch（`accept=".db,.sqlite,.sqlite3"`。失敗時は `#ctl-error` に inline 表示）
+- watch ON/OFF ボタン（`#watch-btn`。状態でラベル切替）
+- 画像指定: 「読み込む」で `/images` fetch（画面遷移なし＝選択保持）。コピー成功時に watch 未 ON ならサーバ側で自動開始
+- `#status-bar`: 2秒ポーリングで更新。**`structured_count` 増加時のみ `location.reload()`**（新着リンク表示）。リロード前の画像指定メッセージは sessionStorage で復元
+- 処理中は file input / 読み込むボタンを disabled
 
-htmx は使わない（プレーン POST + 303 は `admin_templates` の既存パターンと同一。非同期は fetch ポーリング）。
+htmx は使わない（全操作 fetch + `/api/status` ポーリング）。
 
 ### 修正: `main.py`
 
