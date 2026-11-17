@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 from pathlib import Path
@@ -154,8 +156,12 @@ def test_list_multiple_names_via_query(tmp_path):
     """複数の names パラメータでも、カンマ連結の古いクエリを安全に処理する"""
     out_dir = tmp_path / "output_json"
     out_dir.mkdir()
-    write_json_atomic(out_dir / "a-structured_data.json", {"name": "山田", "clinic": "A", "amount": 1000, "date": "2026-01-01"})
-    write_json_atomic(out_dir / "b-structured_data.json", {"name": "鈴木", "clinic": "B", "amount": 2000, "date": "2026-01-02"})
+    write_json_atomic(
+        out_dir / "a-structured_data.json", {"name": "山田", "clinic": "A", "amount": 1000, "date": "2026-01-01"}
+    )
+    write_json_atomic(
+        out_dir / "b-structured_data.json", {"name": "鈴木", "clinic": "B", "amount": 2000, "date": "2026-01-02"}
+    )
     app = create_app(output_dir=str(out_dir), db_path=None)
     with TestClient(app) as client:
         resp = client.get("/list/table?month=2026-01&names=%E5%B1%B1%E7%94%B0%2C%E9%88%B4%E6%9C%A8")
@@ -697,3 +703,175 @@ def test_list_detail_edit_keeps_compensation(tmp_path):
 
         saved = json.loads((out_dir / "r-structured_data.json").read_text(encoding="utf-8"))
         assert saved["compensation"] == 1000
+
+
+# --- Issue #56: Web UI からの watch・設定操作 ---
+
+
+@pytest.fixture
+def web_ctl(tmp_path):
+    """WatchController に fake scan_fn を注入して作成（PaddleOCR は起動しない）。"""
+    from app.services.watch_controller import WatchController
+
+    # CLI の setup_directories 相当: fake scan の書き込み先を用意する
+    (tmp_path / "output_json").mkdir()
+
+    def fake_scan(*args, **kwargs):
+        # input_dir の画像ごとに structured_data.json を 1 件生成する偽スキャン
+        input_dir = Path(args[0])
+        output_dir = Path(args[2])
+        for p in input_dir.iterdir():
+            if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                out = output_dir / f"{p.stem}_123-structured_data.json"
+                if not out.exists():
+                    out.write_text(
+                        '{"name": "山田 太郎", "clinic": "テスト医院", "amount": 1000, "date": "2026-01-15"}',
+                        encoding="utf-8",
+                    )
+        return 1
+
+    ctl = WatchController(
+        input_dir=str(tmp_path / "input"),
+        output_dir=str(tmp_path / "output_json"),
+        processed_dir=str(tmp_path / "processed"),
+        failed_dir=str(tmp_path / "failed"),
+        poll_interval=1,
+        scan_fn=fake_scan,
+        ocr_factory=lambda: object(),
+    )
+    return ctl
+
+
+@pytest.fixture
+def web_client(tmp_path, web_ctl):
+    """コントローラ注入済み TestClient。DB は web_ctl に migration 済み実ファイルを設定。"""
+    db = tmp_path / "web_db.sqlite3"
+    run_migrations(db, SCHEMA_PATH)
+    web_ctl.set_db_path(db)
+    app = create_app(output_dir=str(tmp_path / "output_json"), controller=web_ctl)
+    with TestClient(app) as c:
+        yield c
+
+
+def test_config_rejects_unknown_mode(web_client):
+    resp = web_client.post("/config", data={"preprocess_mode": "bogus"})
+    assert resp.status_code == 400
+
+
+def test_config_db_upload_saves_and_migrates(web_client, tmp_path):
+    """DB ファイルのアップロードで data/ に保存され has_db になる（Q2 案A）"""
+    src = tmp_path / "upload_src.sqlite3"
+    run_migrations(src, SCHEMA_PATH)
+    resp = web_client.post(
+        "/config",
+        files={"db_file": ("my_upload.db", src.read_bytes(), "application/octet-stream")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    from app.services.watch_controller import DATA_DIR
+
+    assert (DATA_DIR / "my_upload.db").exists()
+    assert web_client.get("/api/status").json()["has_db"] is True
+
+
+def test_watch_start_without_db_400(tmp_path):
+    """DB 未選択で watch start は 400（受け入れ要件 2）"""
+    from app.services.watch_controller import WatchController
+
+    ctl = WatchController(
+        input_dir=str(tmp_path / "input"),
+        output_dir=str(tmp_path / "output_json"),
+        scan_fn=lambda *a, **k: 0,
+        ocr_factory=lambda: object(),
+    )
+    app = create_app(output_dir=str(tmp_path / "output_json"), controller=ctl)
+    with TestClient(app) as c:
+        resp = c.post("/watch/start")
+        assert resp.status_code == 400
+        assert "データベース" in resp.json()["detail"]
+
+
+def test_watch_start_stop_toggles(web_client):
+    """watch start → status.watch_on=True、stop → False"""
+    resp = web_client.post("/watch/start", follow_redirects=False)
+    assert resp.status_code == 303
+    assert web_client.get("/api/status").json()["watch_on"] is True
+    web_client.post("/watch/stop", follow_redirects=False)
+    assert web_client.get("/api/status").json()["watch_on"] is False
+
+
+def test_upload_image_without_db_400(tmp_path):
+    """DB 未選択で画像アップロードは 400（受け入れ要件 2）"""
+    from app.services.watch_controller import WatchController
+
+    ctl = WatchController(
+        input_dir=str(tmp_path / "input"),
+        output_dir=str(tmp_path / "output_json"),
+        scan_fn=lambda *a, **k: 0,
+        ocr_factory=lambda: object(),
+    )
+    app = create_app(output_dir=str(tmp_path / "output_json"), controller=ctl)
+    with TestClient(app) as c:
+        resp = c.post("/images", files={"image": ("IMG_001.jpg", b"jpeg", "image/jpeg")})
+        assert resp.status_code == 400
+
+
+def test_upload_image_copies_to_input_dir(web_client, web_ctl):
+    """画像アップロードは input_dir へコピーされる（案C: 即時処理しない）"""
+    resp = web_client.post(
+        "/images",
+        files={"image": ("IMG_001.jpg", b"fake-jpeg-bytes", "image/jpeg")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    dest = web_ctl.input_dir / "IMG_001.jpg"
+    assert dest.exists()
+    assert dest.read_bytes() == b"fake-jpeg-bytes"
+
+
+def test_upload_rejects_non_image(web_client):
+    resp = web_client.post(
+        "/images",
+        files={"image": ("notes.txt", b"hello", "text/plain")},
+    )
+    assert resp.status_code == 400
+
+
+def test_status_endpoint_json(web_client):
+    s = web_client.get("/api/status").json()
+    assert s["watch_on"] is False
+    assert s["has_db"] is True
+    assert s["preprocess_mode"] == "none"
+    assert "input_dir" in s
+
+
+def test_watch_picks_up_uploaded_image(web_client, web_ctl):
+    """watch ON 中にアップロードした画像がポーリングで処理され一覧にリンクが出る"""
+    web_client.post("/watch/start", follow_redirects=False)
+    # スキャン中に POST すると処理中ガード(409)で弾かれるため、アイドル時までリトライする
+    resp = None
+    for _ in range(30):
+        resp = web_client.post(
+            "/images",
+            files={"image": ("IMG_002.jpg", b"fake-jpeg-bytes", "image/jpeg")},
+            follow_redirects=False,
+        )
+        if resp.status_code != 409:
+            break
+        time.sleep(0.1)
+    assert resp.status_code == 303
+    # ポーリングが拾って structured_data.json を生成するまで待つ
+    out_dir = web_ctl.output_dir
+    deadline = 0
+    structured = None
+    while deadline < 100:
+        matches = list(out_dir.glob("*structured_data.json"))
+        if matches:
+            structured = matches[0]
+            break
+        time.sleep(0.1)
+        deadline += 1
+    assert structured is not None, "structured_data.json が生成されない"
+    page = web_client.get("/")
+    assert "IMG_002" in page.text  # 一覧にリンクが追加されている
+    web_client.post("/watch/stop", follow_redirects=False)

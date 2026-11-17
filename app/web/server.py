@@ -13,6 +13,7 @@ from app.services.template_admin_service import (
     TemplateAdminService,
     TemplateBasisConflictError,
 )
+from app.services.watch_controller import DEFAULT_INPUT_DIR, WatchController
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
@@ -43,15 +44,30 @@ def _parse_names(values: Iterable[Any], known_names: Iterable[str] | None = None
     return names
 
 
-def create_app(output_dir: str = "output_json", db_path: str | None = None) -> FastAPI:
+def create_app(
+    output_dir: str = "output_json",
+    db_path: str | None = None,
+    input_dir: str | None = None,
+    processed_dir: str = "processed",
+    failed_dir: str = "failed",
+    controller: WatchController | None = None,
+) -> FastAPI:
     """FastAPI アプリケーションを生成するファクトリ関数。テストで使用可能。"""
+    controller = controller or WatchController(
+        input_dir=input_dir or DEFAULT_INPUT_DIR,
+        output_dir=output_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        db_path=db_path,
+    )
     app = FastAPI()
 
     def get_output_dir() -> Path:
         return Path(output_dir)
 
     def get_db_path() -> Path | None:
-        return Path(db_path) if db_path else None
+        db = controller.db_path
+        return Path(db) if db else None
 
     async def get_receipt_service(
         output_dir: Path = Depends(get_output_dir),
@@ -186,9 +202,13 @@ def create_app(output_dir: str = "output_json", db_path: str | None = None) -> F
 
     @app.get("/", response_class=HTMLResponse)
     async def read_root(request: Request, service: ReceiptService = Depends(get_receipt_service)):
-        """一覧ページを表示"""
+        """一覧ページ（操作パネル + 状態バー + 一覧）を表示"""
         items = service.get_all_receipts()
-        return templates.TemplateResponse(request=request, name="index.html", context={"items": items})
+        return templates.TemplateResponse(
+            request=request,
+            name="index.html",
+            context={"items": items, "ctl": controller.get_status()},
+        )
 
     @app.get("/{file_stem}", response_class=HTMLResponse)
     async def read_item(
@@ -250,5 +270,63 @@ def create_app(output_dir: str = "output_json", db_path: str | None = None) -> F
             )
 
         return {"status": "updated", "data": result["data"]}
+
+    @app.post("/config")
+    async def post_config(request: Request):
+        """指定フォルダ / 前処理 / DB ファイル を設定する"""
+        form = await request.form()
+        input_dir = form.get("input_dir")
+        if input_dir:
+            controller.set_input_dir(str(input_dir))
+        mode = str(form.get("preprocess_mode") or controller.preprocess_mode)
+        try:
+            controller.set_preprocess_mode(mode)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        db_file = form.get("db_file")
+        if db_file is not None and getattr(db_file, "filename", ""):
+            try:
+                controller.save_db_upload(await db_file.read(), db_file.filename)
+            except Exception:
+                raise HTTPException(status_code=400, detail="データベースファイルを開けませんでした")
+        return RedirectResponse(url="/", status_code=303)
+
+    @app.post("/watch/start")
+    async def watch_start():
+        """フォルダ監視を開始する（DB 未選択は 400）"""
+        try:
+            controller.start_watch()
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return RedirectResponse(url="/", status_code=303)
+
+    @app.post("/watch/stop")
+    async def watch_stop():
+        """フォルダ監視を停止する"""
+        controller.stop_watch()
+        return RedirectResponse(url="/", status_code=303)
+
+    @app.post("/images")
+    async def upload_image(request: Request):
+        """画像を指定フォルダへコピーする（案C: コピーのみ。処理は watch のポーリングが行う）"""
+        if not controller.has_db:
+            raise HTTPException(status_code=400, detail="データベースを選択してください")
+        if controller.is_processing:
+            raise HTTPException(status_code=409, detail="処理中です。完了までお待ちください")
+        form = await request.form()
+        image = form.get("image")
+        if image is None or not getattr(image, "filename", ""):
+            raise HTTPException(status_code=400, detail="画像ファイルを選択してください")
+        content = await image.read()
+        try:
+            controller.copy_image(image.filename, content)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return RedirectResponse(url="/", status_code=303)
+
+    @app.get("/api/status")
+    async def api_status():
+        """JS ポーリング用の状態 JSON"""
+        return controller.get_status()
 
     return app
