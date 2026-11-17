@@ -868,12 +868,18 @@ def test_upload_rejects_non_image(web_client):
     assert resp.status_code == 400
 
 
-def test_status_endpoint_json(web_client):
+def test_status_endpoint_json(web_client, web_ctl):
     s = web_client.get("/api/status").json()
     assert s["watch_on"] is False
     assert s["has_db"] is True
     assert s["preprocess_mode"] == "none"
     assert "input_dir" in s
+    assert s["structured_count"] == 0
+    # structured data が増えるとカウントが増える（完了検知の基準）
+    web_ctl.output_dir.mkdir(parents=True, exist_ok=True)
+    (web_ctl.output_dir / "r-structured_data.json").write_text("{}", encoding="utf-8")
+    s2 = web_client.get("/api/status").json()
+    assert s2["structured_count"] == 1
 
 
 def test_watch_picks_up_uploaded_image(web_client, web_ctl):
@@ -906,6 +912,41 @@ def test_watch_picks_up_uploaded_image(web_client, web_ctl):
     page = web_client.get("/")
     assert "IMG_002" in page.text  # 一覧にリンクが追加されている
     web_client.post("/watch/stop", follow_redirects=False)
+
+
+def test_config_db_only_upload(web_client, tmp_path):
+    """DB ファイルのみの /config 送信（選択即確定の JS が送る形）で has_db になる"""
+    from app.db_migrations import run_migrations
+
+    src = tmp_path / "only_db.sqlite3"
+    run_migrations(src, SCHEMA_PATH)
+    resp = web_client.post(
+        "/config",
+        files={"db_file": ("auto.db", src.read_bytes(), "application/octet-stream")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert web_client.get("/api/status").json()["has_db"] is True
+
+
+def test_images_upload_requires_file(web_client):
+    """画像なしの /images は 400"""
+    resp = web_client.post("/images", data={}, follow_redirects=False)
+    assert resp.status_code == 400
+
+
+def test_images_upload_autostarts_watch(web_client, web_ctl):
+    """画像読み込み成功時に watch が自動開始する（選択＝確定の期待に応える）"""
+    try:
+        resp = web_client.post(
+            "/images",
+            files={"image": ("IMG_003.jpg", b"fake-jpeg-bytes", "image/jpeg")},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert web_client.get("/api/status").json()["watch_on"] is True
+    finally:
+        web_ctl.stop_watch()
 
 
 # --- Issue #56: index.html 表示（操作パネル / 状態バー / ポーリング JS） ---
@@ -952,3 +993,20 @@ def test_index_has_status_poll_script(web_client):
     page = web_client.get("/")
     assert "/api/status" in page.text
     assert "pollStatus" in page.text
+
+
+def test_index_has_auto_apply_elements(web_client):
+    """選択即確定 UI の要素 id と fetch 配線が含まれる（Issue #56 UX 修正）"""
+    page = web_client.get("/").text
+    for needle in (
+        'id="db-file-input"',
+        'id="db-hint"',
+        'id="watch-btn"',
+        'id="image-result"',
+        'id="input-dir-apply"',
+        'id="ctl-error"',
+        "postForm('/config'",
+        "postForm('/images'",
+        'accept=".db,.sqlite,.sqlite3"',
+    ):
+        assert needle in page, f"{needle} が index.html に含まれない"

@@ -247,6 +247,7 @@ def test_get_status_shape(tmp_path):
         "preprocess_mode",
         "poll_interval",
         "last_error",
+        "structured_count",
     }
     assert s["has_db"] is False
     assert s["preprocess_mode"] == "none"

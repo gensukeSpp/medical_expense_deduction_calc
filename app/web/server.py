@@ -322,6 +322,13 @@ def create_app(
             controller.copy_image(image.filename, content)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        # 案C（コピーのみ・即時処理しない）を維持しつつ、ポーリング監視を即始動させることで
+        # 「読み込む＝処理開始」という期待に応える（未 ON 時のみ・DB 未選択は手前で 400）
+        if not controller.watch_on:
+            try:
+                controller.start_watch()
+            except ValueError:
+                pass
         return RedirectResponse(url="/", status_code=303)
 
     @app.get("/api/status")

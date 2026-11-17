@@ -225,4 +225,5 @@ class WatchController:
             "preprocess_mode": self.preprocess_mode,
             "poll_interval": self.poll_interval,
             "last_error": self.last_error,
+            "structured_count": len(list(self.output_dir.glob("*-structured_data.json"))),
         }
