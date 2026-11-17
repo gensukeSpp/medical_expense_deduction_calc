@@ -55,3 +55,13 @@ uv run python main.py --serve --port 8000 --db-path data/db.sqlite3
 
 - 引数定義: `app/args.py::setup_args()`
 - ディレクトリ初期化: `app/args.py::setup_directories()`
+
+## Web UI 運用 (Issue #56)
+
+- 起動: `uv run python main.py --serve [--port 8000] [--db-path data/db.sqlite3]`
+- `--serve` では OCR を遅延初期化するため起動が高速。PaddleOCR は初回スキャン時に生成
+- 操作パネル: 指定フォルダ(input_dir) / 前処理(preprocess_mode) / DB アップロード(data/ へ保存)
+- 画像アップロードは指定フォルダへ**コピーのみ**（watch ON のポーリングが処理）
+- watch 開始・画像指定は DB 選択必須（未選択なら 400）
+- 処理中はファイル指定が disabled になり、完了で一覧が自動更新される
+- 状態はプロセス内メモリのみ（サーバ再起動でリセット）
