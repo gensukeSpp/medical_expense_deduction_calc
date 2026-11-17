@@ -13,7 +13,24 @@ def main():
         schema_path = Path("docs/schema.sql")
         run_migrations(args.db_path, schema_path)
 
-    # OCRエンジン初期化
+    # Web UI サーバー起動 (OCR は WatchController が遅延初期化するためここでは生成しない)
+    if args.serve:
+        import uvicorn
+        from app.web.server import create_app
+
+        app = create_app(
+            output_dir=str(output_dir),
+            db_path=args.db_path,
+            input_dir=str(input_dir),
+            processed_dir=str(processed_dir),
+            failed_dir=str(failed_dir),
+        )
+
+        print(f"Starting Web UI at http://{args.host}:{args.port}")
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        return
+
+    # OCRエンジン初期化（CLI 系パスのみ）
     from paddleocr import PaddleOCR
 
     ocr = PaddleOCR(use_angle_cls=True, lang="japan", enable_mkldnn=False)
@@ -89,17 +106,6 @@ def main():
             preprocess_force=args.preprocess_force,
             target_short_side=args.target_short_side,
         )
-
-    # Web UI サーバー起動
-    if args.serve:
-        import uvicorn
-        from app.web.server import create_app
-
-        app = create_app(output_dir=args.output_dir, db_path=args.db_path)
-
-        print(f"Starting Web UI at http://{args.host}:{args.port}")
-        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
-        return
 
 
 if __name__ == "__main__":
