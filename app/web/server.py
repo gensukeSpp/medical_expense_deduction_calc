@@ -13,6 +13,7 @@ from app.services.template_admin_service import (
     TemplateAdminService,
     TemplateBasisConflictError,
 )
+from app.services import watch_controller
 from app.services.watch_controller import DEFAULT_INPUT_DIR, WatchController
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
@@ -51,6 +52,7 @@ def create_app(
     processed_dir: str = "processed",
     failed_dir: str = "failed",
     controller: WatchController | None = None,
+    data_dir: str | None = None,
 ) -> FastAPI:
     """FastAPI アプリケーションを生成するファクトリ関数。テストで使用可能。"""
     controller = controller or WatchController(
@@ -59,6 +61,8 @@ def create_app(
         processed_dir=processed_dir,
         failed_dir=failed_dir,
         db_path=db_path,
+        # DATA_DIR は実行時にモジュール変数から解決する（テストからの差し替えを許可）
+        data_dir=data_dir or watch_controller.DATA_DIR,
     )
     app = FastAPI()
 
@@ -287,6 +291,8 @@ def create_app(
         if db_file is not None and getattr(db_file, "filename", ""):
             try:
                 controller.save_db_upload(await db_file.read(), db_file.filename)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
             except Exception:
                 raise HTTPException(status_code=400, detail="データベースファイルを開けませんでした")
         return RedirectResponse(url="/", status_code=303)

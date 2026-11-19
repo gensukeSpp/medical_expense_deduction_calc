@@ -13,6 +13,8 @@ from app.db_migrations import run_migrations
 from app.services.watch_controller import PREPROCESS_MODES, WatchController
 
 SCHEMA_PATH = "docs/schema.sql"
+# リポジトリ直下の data/（実データ置き場）。テストはここへ書き込んではいけない。
+REPO_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
 # --- 設定: input_dir ---
@@ -85,6 +87,7 @@ def _make_ctl(tmp_path, scan_fn, poll_interval: float = 0.1, with_db: bool = Tru
         poll_interval=poll_interval,
         scan_fn=scan_fn,
         ocr_factory=lambda: object(),
+        data_dir=str(tmp_path / "data"),
     )
     if with_db:
         db = tmp_path / "db.sqlite3"
@@ -189,7 +192,7 @@ def test_save_db_upload_migrates_and_sets_db_path(tmp_path):
     run_migrations(db, SCHEMA_PATH)
     ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0, with_db=False)
     dest = ctl.save_db_upload(db.read_bytes(), "my.db")
-    assert dest == Path("data") / "my.db"
+    assert dest == tmp_path / "data" / "my.db"
     assert dest.exists()
     assert ctl.has_db is True
     conn = sqlite3.connect(str(dest))
@@ -213,7 +216,118 @@ def test_save_db_upload_invalid_file_raises(tmp_path):
     ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0, with_db=False)
     with pytest.raises(Exception):
         ctl.save_db_upload(b"not a sqlite db", "bad.db")
-    assert not (Path("data") / "bad.db").exists()
+    assert not (tmp_path / "data" / "bad.db").exists()
+    # 一時ファイルも残さない
+    assert list((tmp_path / "data").glob(".upload-*")) == []
+
+
+def test_save_db_upload_rejects_db_without_required_tables(tmp_path):
+    """必須テーブルが無い SQLite は拒否される"""
+    other = tmp_path / "other.sqlite3"
+    conn = sqlite3.connect(str(other))
+    conn.execute("CREATE TABLE unrelated (id INTEGER)")
+    conn.commit()
+    conn.close()
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0, with_db=False)
+    with pytest.raises(ValueError, match="必須テーブル"):
+        ctl.save_db_upload(other.read_bytes(), "other.db")
+    assert not (tmp_path / "data" / "other.db").exists()
+
+
+# --- [高-1] 既存 DB の上書き・削除防止 ---
+
+
+def _make_existing_db(path: Path, marker: str) -> None:
+    """既存 DB を作成し、内容を識別できる marker テーブルを入れる。"""
+    run_migrations(path, SCHEMA_PATH)
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE IF NOT EXISTS marker (value TEXT)")
+    conn.execute("INSERT INTO marker (value) VALUES (?)", (marker,))
+    conn.commit()
+    conn.close()
+
+
+def _read_marker(path: Path) -> list[str]:
+    """marker テーブルの値を読み出す。"""
+    conn = sqlite3.connect(str(path))
+    try:
+        return [r[0] for r in conn.execute("SELECT value FROM marker")]
+    finally:
+        conn.close()
+
+
+def test_save_db_upload_invalid_keeps_existing_db(tmp_path):
+    """[高-1] 不正バイト列を既存同名 DB でアップロードしても既存 DB は消えない"""
+    existing = tmp_path / "data" / "db.sqlite3"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    _make_existing_db(existing, "original")
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0, with_db=False)
+    with pytest.raises(Exception):
+        ctl.save_db_upload(b"not a sqlite db", "db.sqlite3")
+    assert existing.exists()
+    assert _read_marker(existing) == ["original"]
+
+
+def test_save_db_upload_valid_keeps_existing_db(tmp_path):
+    """[高-1] 正常 DB を既存同名でアップロードしても既存 DB は上書きされない"""
+    existing = tmp_path / "data" / "db.sqlite3"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    _make_existing_db(existing, "original")
+    src = tmp_path / "src.sqlite3"
+    run_migrations(src, SCHEMA_PATH)
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0, with_db=False)
+    dest = ctl.save_db_upload(src.read_bytes(), "db.sqlite3")
+    # 既存ファイルはそのまま残る
+    assert existing.exists()
+    assert _read_marker(existing) == ["original"]
+    # 新しい内容は別名（連番）で保存される
+    assert dest != existing
+    assert dest.exists()
+    assert dest.name == "db_1.sqlite3"
+    assert ctl.db_path == str(dest)
+
+
+def test_save_db_upload_does_not_delete_existing_db_on_failure(tmp_path):
+    """[高-1] migration 失敗時も既存 DB は削除されない"""
+    existing = tmp_path / "data" / "db.sqlite3"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    _make_existing_db(existing, "original")
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0, with_db=False)
+    # 壊れたスキーマパスで migration を失敗させる
+    ctl.schema_path = tmp_path / "missing_schema.sql"
+    with pytest.raises(Exception):
+        ctl.save_db_upload(existing.read_bytes(), "db.sqlite3")
+    assert existing.exists()
+    assert _read_marker(existing) == ["original"]
+    assert list((tmp_path / "data").glob(".upload-*")) == []
+
+
+def test_save_db_upload_rejects_empty_filename(tmp_path):
+    """空のファイル名は拒否される"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0, with_db=False)
+    with pytest.raises(ValueError):
+        ctl.save_db_upload(b"x", "")
+
+
+# --- [低-1] テストの隔離: リポジトリ直下の data/ を書き換えない ---
+
+
+def test_default_data_dir_is_isolated_from_repo_data():
+    """[低-1] data_dir 未指定でも保存先はリポジトリ直下の data/ ではない"""
+    ctl = WatchController()
+    assert ctl.data_dir != REPO_DATA_DIR
+    assert REPO_DATA_DIR not in ctl.data_dir.parents
+
+
+def test_save_db_upload_with_default_data_dir_does_not_touch_repo(tmp_path):
+    """[低-1] data_dir 未指定のアップロードでもリポジトリ直下の data/ には保存されない"""
+    db = tmp_path / "src.sqlite3"
+    run_migrations(db, SCHEMA_PATH)
+    ctl = WatchController()
+    dest = ctl.save_db_upload(db.read_bytes(), "isolated.db")
+    assert dest.exists()
+    assert REPO_DATA_DIR not in dest.parents
+    assert not (REPO_DATA_DIR / "isolated.db").exists()
 
 
 # --- 画像コピー ---

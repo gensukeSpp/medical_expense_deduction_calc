@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -82,7 +83,8 @@ class TestRunOcr:
     ):
         output_json_path = output_dir / "receipt-001_12345-raw_data.json"
         with patch("app.services.image_processing_service.process_image", return_value=[{"text": "hello"}]) as mock_pi:
-            service._run_ocr(image_path, output_dir, output_json_path)
+            with caplog.at_level(logging.INFO):
+                service._run_ocr(image_path, output_dir, output_json_path)
             mock_pi.assert_called_once_with(
                 image_path,
                 output_dir=output_dir,
@@ -90,7 +92,9 @@ class TestRunOcr:
                 ocr=service.ocr_engine,
                 target_short_side=960,
             )
-        assert "Saved 1 item to" in caplog.text
+        # process_image は常に list を返すため「Saved %d items to」形式で記録される
+        # （dict 分岐は未使用）。情報ログは caplog 既定レベルでは捕捉されないため明示的に有効化。
+        assert "Saved 1 items to" in caplog.text
 
     def test_logs_warning_when_none(
         self, service: ImageProcessingService, image_path: Path, output_dir: Path, caplog: pytest.LogCaptureFixture

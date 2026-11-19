@@ -1,4 +1,5 @@
 import re
+import sqlite3
 import time
 
 import pytest
@@ -716,6 +717,7 @@ def web_ctl(tmp_path):
 
     # CLI の setup_directories 相当: fake scan の書き込み先を用意する
     (tmp_path / "output_json").mkdir()
+    (tmp_path / "data").mkdir()
 
     def fake_scan(*args, **kwargs):
         # input_dir の画像ごとに structured_data.json を 1 件生成する偽スキャン
@@ -739,6 +741,7 @@ def web_ctl(tmp_path):
         poll_interval=1,
         scan_fn=fake_scan,
         ocr_factory=lambda: object(),
+        data_dir=str(tmp_path / "data"),
     )
     return ctl
 
@@ -789,7 +792,7 @@ def test_config_rejects_unknown_mode(web_client):
     assert resp.status_code == 400
 
 
-def test_config_db_upload_saves_and_migrates(web_client, tmp_path):
+def test_config_db_upload_saves_and_migrates(web_client, web_ctl, tmp_path):
     """DB ファイルのアップロードで data/ に保存され has_db になる（Q2 案A）"""
     src = tmp_path / "upload_src.sqlite3"
     run_migrations(src, SCHEMA_PATH)
@@ -799,10 +802,47 @@ def test_config_db_upload_saves_and_migrates(web_client, tmp_path):
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    from app.services.watch_controller import DATA_DIR
-
-    assert (DATA_DIR / "my_upload.db").exists()
+    assert (web_ctl.data_dir / "my_upload.db").exists()
     assert web_client.get("/api/status").json()["has_db"] is True
+
+
+def test_config_db_upload_invalid_returns_400(web_client, web_ctl):
+    """不正な DB ファイルは 400（詳細メッセージ付き）で保存されない"""
+    resp = web_client.post(
+        "/config",
+        files={"db_file": ("bad.db", b"not a sqlite db", "application/octet-stream")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 400
+    assert not (web_ctl.data_dir / "bad.db").exists()
+
+
+def test_config_db_upload_keeps_existing_db(web_client, web_ctl, tmp_path):
+    """[高-1] 既存同名 DB へのアップロードで既存 DB は上書き・削除されない"""
+    existing = web_ctl.data_dir / "db.sqlite3"
+    run_migrations(existing, SCHEMA_PATH)
+    conn = sqlite3.connect(str(existing))
+    conn.execute("CREATE TABLE IF NOT EXISTS marker (value TEXT)")
+    conn.execute("INSERT INTO marker (value) VALUES ('original')")
+    conn.commit()
+    conn.close()
+
+    src = tmp_path / "src.sqlite3"
+    run_migrations(src, SCHEMA_PATH)
+    resp = web_client.post(
+        "/config",
+        files={"db_file": ("db.sqlite3", src.read_bytes(), "application/octet-stream")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    # 既存 DB は保持される
+    conn = sqlite3.connect(str(existing))
+    try:
+        assert [r[0] for r in conn.execute("SELECT value FROM marker")] == ["original"]
+    finally:
+        conn.close()
+    # 新しい内容は別名で保存される
+    assert (web_ctl.data_dir / "db_1.sqlite3").exists()
 
 
 def test_watch_start_without_db_400(tmp_path):

@@ -8,8 +8,11 @@ CLI の --watch / --input-dir / --db-path / --preprocess-mode 相当の状態と
 from __future__ import annotations
 
 import logging
+import os
+import sqlite3
 import threading
 from pathlib import Path
+from uuid import uuid4
 
 from app import watcher
 
@@ -20,12 +23,50 @@ PREPROCESS_MODES = ["none", "clahe", "adaptive", "clahe+adaptive"]
 DATA_DIR = Path("data")
 SCHEMA_PATH = Path("docs/schema.sql")
 
+# SQLite ファイルヘッダ（16 バイト）
+SQLITE_MAGIC = b"SQLite format 3\x00"
+# アップロードされた DB に必須のテーブル（存在しない場合は拒否する）
+REQUIRED_TABLES = ("receipts", "clinics", "templates", "corrections")
+
 
 def _default_ocr_factory():
     """PaddleOCR の遅延初期化。--serve 起動を速く保つため module 直下では生成しない。"""
     from paddleocr import PaddleOCR
 
     return PaddleOCR(use_angle_cls=True, lang="japan", enable_mkldnn=False)
+
+
+def _atomic_install(src: Path, dest: Path) -> None:
+    """一時ファイルを配置先へ原子的に移動する（既存ファイルを上書きしない）。
+
+    ``os.link`` は dest が既に存在する場合に失敗するため、上書きが原理的に
+    起きない。ハードリンク非対応環境では ``O_EXCL`` で名前を予約してから置換する。
+
+    Args:
+        src: 移動元の一時ファイル。
+        dest: 移動先（存在しないこと）。
+
+    Raises:
+        FileExistsError: 配置先ファイルが既に存在する場合。
+    """
+    try:
+        os.link(src, dest)
+    except FileExistsError:
+        raise
+    except OSError:
+        # ハードリンク非対応環境: O_EXCL で名前を排他予約してから置換する
+        try:
+            fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            raise
+        os.close(fd)
+        try:
+            os.replace(src, dest)
+        except Exception:
+            dest.unlink(missing_ok=True)  # 予約した空ファイルを片付ける
+            raise
+        return
+    os.unlink(src)
 
 
 class WatchController:
@@ -44,11 +85,15 @@ class WatchController:
         scan_fn=watcher.scan_and_process,
         ocr_factory=None,
         schema_path: Path = SCHEMA_PATH,
+        data_dir: str | Path | None = None,
     ) -> None:
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.processed_dir = Path(processed_dir)
         self.failed_dir = Path(failed_dir)
+        # data_dir は実行時にモジュール変数 DATA_DIR から解決する。
+        # 既定値を引数定義時に固定しないことで、テストから DATA_DIR を差し替えられる。
+        self.data_dir = Path(data_dir) if data_dir else Path(DATA_DIR)
         self.poll_interval = poll_interval
         self.model = model
         self.schema_path = Path(schema_path)
@@ -84,12 +129,16 @@ class WatchController:
         if path is None:
             self._db_path = None
             return
-        from app.db_migrations import run_migrations
-
         p = Path(path)
-        run_migrations(p, self.schema_path)
+        self._run_migrations(p)
         self._db_path = p
         LOG.info("db_path -> %s", p)
+
+    def _run_migrations(self, db_path: Path) -> None:
+        """指定 DB に migration を適用する。"""
+        from app.db_migrations import run_migrations
+
+        run_migrations(db_path, self.schema_path)
 
     def set_preprocess_mode(self, mode: str) -> None:
         """前処理モードを検証して設定する。未知の値は ValueError。"""
@@ -183,21 +232,105 @@ class WatchController:
     # ------------------------------------------------------------------
 
     def save_db_upload(self, content: bytes, filename: str) -> Path:
-        """アップロードされた DB を data/ に保存し migration を適用する。
+        """アップロードされた DB を data/ 配下へ保存し migration を適用する。
 
-        不正なファイルは例外を投げ、保存先を掃除する（Q2 案A: data/ へ元ファイル名で保存）。
+        既存 DB を失わないよう、次の順序で処理する。
+
+        1. 一時ファイル（``.upload-*.tmp``）へ書き込む
+        2. SQLite ヘッダと必須テーブルの存在を検証する
+        3. 一時ファイルへ migration を適用する
+        4. 検証済みの内容を原子的に rename して保存する
+
+        同名の既存ファイルは上書きせず連番（``name_1.db`` 等）で保存する。
+        失敗時は今回作成した一時ファイルのみ削除する（既存 DB は残す）。
+
+        Args:
+            content: アップロードされたファイル内容。
+            filename: 元ファイル名（basename のみ利用する）。
+
+        Returns:
+            Path: 実際に保存された DB ファイルのパス。
+
+        Raises:
+            ValueError: ファイル名が不正、または SQLite DB として不正な場合。
         """
         name = Path(filename).name  # basename のみ（パス注入防止）
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        dest = DATA_DIR / name
-        dest.write_bytes(content)
+        if not name or name in {".", ".."}:
+            raise ValueError("ファイル名が不正です")
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.data_dir / f".upload-{uuid4().hex}.tmp"
         try:
-            self.set_db_path(dest)
+            tmp_path.write_bytes(content)
+            self._validate_uploaded_db(tmp_path)
+            self._run_migrations(tmp_path)
+            dest = self._install_db(tmp_path, name)
         except Exception:
-            LOG.exception("Failed to migrate uploaded DB %s", dest)
-            dest.unlink(missing_ok=True)
+            LOG.exception("Failed to save uploaded DB %s", name)
+            tmp_path.unlink(missing_ok=True)  # 今回作った一時ファイルのみ削除
             raise
+        # migration は一時ファイルへ適用済みなので、配置先のパスを設定する
+        self._db_path = dest
+        LOG.info("db_path -> %s", dest)
         return dest
+
+    def _validate_uploaded_db(self, path: Path) -> None:
+        """アップロードされた DB ファイルの妥当性を検証する。
+
+        SQLite ヘッダと必須テーブルの存在を確認する。
+
+        Args:
+            path: 検証対象の DB ファイルパス。
+
+        Raises:
+            ValueError: SQLite ヘッダが無い、または必須テーブルが存在しない場合。
+        """
+        with open(path, "rb") as f:
+            header = f.read(len(SQLITE_MAGIC))
+        if header != SQLITE_MAGIC:
+            raise ValueError("SQLite データベースファイルではありません")
+        try:
+            conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        except sqlite3.Error as e:
+            raise ValueError(f"データベースを開けません: {e}") from e
+        try:
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        except sqlite3.DatabaseError as e:
+            raise ValueError(f"データベースを開けません: {e}") from e
+        finally:
+            conn.close()
+        missing = [t for t in REQUIRED_TABLES if t not in tables]
+        if missing:
+            raise ValueError(f"必須テーブルがありません: {', '.join(missing)}")
+
+    def _install_db(self, tmp_path: Path, name: str) -> Path:
+        """一時ファイルを data/ 配下へ配置する（既存ファイルを上書きしない）。
+
+        同名のファイルが既にある場合は連番（``name_1.db`` 等）を付与して保存する。
+
+        Args:
+            tmp_path: 配置する一時ファイル。
+            name: 保存したいファイル名（basename）。
+
+        Returns:
+            Path: 実際に配置されたパス。
+
+        Raises:
+            ValueError: 保存先が見つからない場合。
+        """
+        stem, suffix = Path(name).stem, Path(name).suffix
+        for index in range(1000):
+            dest = self.data_dir / (name if index == 0 else f"{stem}_{index}{suffix}")
+            if dest.exists():
+                continue
+            try:
+                _atomic_install(tmp_path, dest)
+            except FileExistsError:
+                # 配置直前に同名ファイルが作成された場合は次の連番へ
+                continue
+            if index:
+                LOG.info("Existing DB found, saved with a new name: %s", dest)
+            return dest
+        raise ValueError(f"保存先が見つかりません: {name}")
 
     def copy_image(self, filename: str, content: bytes) -> Path:
         """アップロード画像を input_dir へコピーする（案C: コピーのみ・即時処理しない）。"""
