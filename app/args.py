@@ -87,6 +87,16 @@ def setup_directories(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]
     return input_dir, output_dir, processed_dir, failed_dir
 
 
+def validate_input_dir(path: str | Path) -> Path:
+    """input_dir が絶対パスかつホームディレクトリ配下であることを検証する。"""
+    input_dir = Path(path).expanduser()
+    if not input_dir.is_absolute():
+        raise ValueError("絶対パスを指定してください")
+    if not input_dir.resolve().is_relative_to(Path.home().resolve()):
+        raise ValueError("ホームディレクトリ配下のパスのみ指定できます")
+    return input_dir
+
+
 def is_loopback_host(host: str) -> bool:
     """Web サーバの host がループバック（localhost / 127.0.0.1 / ::1 等）か判定する。
 
