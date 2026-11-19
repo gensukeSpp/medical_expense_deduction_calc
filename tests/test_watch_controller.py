@@ -431,6 +431,16 @@ def test_copy_image_rejects_non_image(tmp_path):
         ctl.copy_image("notes.txt", b"hello")
 
 
+def test_copy_image_rejects_existing_same_name(tmp_path):
+    """[中-5] 同名の既存画像は上書きされず FileExistsError になる"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    ctl.copy_image("IMG_001.jpg", b"first-bytes")
+    with pytest.raises(FileExistsError):
+        ctl.copy_image("IMG_001.jpg", b"second-bytes")
+    # 原画像は失われない
+    assert (ctl.input_dir / "IMG_001.jpg").read_bytes() == b"first-bytes"
+
+
 # --- 状態 ---
 
 

@@ -380,6 +380,8 @@ class WatchController:
         [中-3] コピー直後〜 structured 生成完了までを「処理待ち」状態として保持し、
         スキャン 1 サイクルで消費されたら解除する。
 
+        [中-5] 同名の既存画像は無確認で上書きせず FileExistsError にする。
+
         Args:
             filename: 元ファイル名（basename のみ利用する）。
             content: ファイル内容。
@@ -389,12 +391,16 @@ class WatchController:
 
         Raises:
             ValueError: 画像ファイルでない場合。
+            FileExistsError: 同名の既存画像がある場合。
         """
         name = Path(filename).name
         if Path(name).suffix.lower() not in watcher.IMAGE_EXT:
             raise ValueError("画像ファイルのみ指定できます")
         self.input_dir.mkdir(parents=True, exist_ok=True)
         dest = self.input_dir / name
+        if dest.exists():
+            # [中-5] 同名の既存画像は無確認で上書きしない（連番は再処理による重複登録を招くため不可）
+            raise FileExistsError(f"同名のファイルが既に存在します: {name}")
         dest.write_bytes(content)
         self._pending_image = name
         self._pending_process = True
