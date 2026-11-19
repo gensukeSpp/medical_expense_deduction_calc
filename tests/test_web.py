@@ -1001,32 +1001,31 @@ def test_status_endpoint_json(web_client, web_ctl):
 
 
 def test_watch_picks_up_uploaded_image(web_client, web_ctl):
-    """watch ON 中にアップロードした画像がポーリングで処理され一覧にリンクが出る"""
+    """[低-3] リトライなし: アップロード → ポーリング処理 → structured 生成で pending 解除"""
     web_client.post("/watch/start", follow_redirects=False)
-    # スキャン中に POST すると処理中ガード(409)で弾かれるため、アイドル時までリトライする
-    resp = None
-    for _ in range(30):
-        resp = web_client.post(
-            "/images",
-            files={"image": ("IMG_002.jpg", b"fake-jpeg-bytes", "image/jpeg")},
-            follow_redirects=False,
-        )
-        if resp.status_code != 409:
+    # 初回スキャン完了（アイドル）まで待つ — スキャン中の POST は仕様上の 409
+    for _ in range(50):
+        if not web_client.get("/api/status").json()["is_processing"]:
             break
         time.sleep(0.1)
+    # 409 リトライループなしの 1 回 POST
+    resp = web_client.post(
+        "/images",
+        files={"image": ("IMG_002.jpg", b"fake-jpeg-bytes", "image/jpeg")},
+        follow_redirects=False,
+    )
     assert resp.status_code == 303
-    # ポーリングが拾って structured_data.json を生成するまで待つ
-    out_dir = web_ctl.output_dir
+    # ポーリングが拾って structured_data.json を生成するまで待つ（完了で pending 解除）
     deadline = 0
-    structured = None
+    s = None
     while deadline < 100:
-        matches = list(out_dir.glob("*structured_data.json"))
-        if matches:
-            structured = matches[0]
+        s = web_client.get("/api/status").json()
+        if s["structured_count"] > 0 and not s["pending"]:
             break
         time.sleep(0.1)
         deadline += 1
-    assert structured is not None, "structured_data.json が生成されない"
+    assert s is not None and s["structured_count"] > 0, "structured_data.json が生成されない"
+    assert s["pending"] is False
     page = web_client.get("/")
     assert "IMG_002" in page.text  # 一覧にリンクが追加されている
     web_client.post("/watch/stop", follow_redirects=False)
