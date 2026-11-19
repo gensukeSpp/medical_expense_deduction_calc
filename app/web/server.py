@@ -281,7 +281,10 @@ def create_app(
         form = await request.form()
         input_dir = form.get("input_dir")
         if input_dir:
-            controller.set_input_dir(str(input_dir))
+            try:
+                controller.set_input_dir(str(input_dir))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
         mode = str(form.get("preprocess_mode") or controller.preprocess_mode)
         try:
             controller.set_preprocess_mode(mode)

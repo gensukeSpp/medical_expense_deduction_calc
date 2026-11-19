@@ -772,9 +772,12 @@ def test_index_shows_control_panel(web_client):
     assert "1枚ずつ" in resp.text
 
 
-def test_config_updates_input_dir_and_mode(web_client, tmp_path):
+def test_config_updates_input_dir_and_mode(web_client, tmp_path, monkeypatch):
     """POST /config で input_dir / preprocess_mode が反映される"""
-    new_dir = tmp_path / "another"
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    new_dir = home / "another"
     resp = web_client.post(
         "/config",
         data={"input_dir": str(new_dir), "preprocess_mode": "clahe"},
@@ -785,6 +788,19 @@ def test_config_updates_input_dir_and_mode(web_client, tmp_path):
     page = web_client.get("/")
     assert str(new_dir) in page.text
     assert 'value="clahe" selected' in page.text
+
+
+def test_config_rejects_path_outside_home(web_client, tmp_path, monkeypatch):
+    """[中-4] ホーム外の input_dir は 400"""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    resp = web_client.post(
+        "/config",
+        data={"input_dir": str(tmp_path / "outside")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 400
 
 
 def test_config_rejects_unknown_mode(web_client):

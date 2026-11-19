@@ -120,8 +120,26 @@ class WatchController:
     # ------------------------------------------------------------------
 
     def set_input_dir(self, path: str | Path) -> Path:
-        """input_dir を更新し、存在しなければ作成する。"""
+        """input_dir を更新し、存在しなければ作成する。
+
+        [中-4] 認証のない変更系エンドポイントの任意パス操作を防ぐため、
+        絶対パスかつユーザーのホームディレクトリ配下のみ許可する。
+
+        Args:
+            path: 指定する input_dir のパス。
+
+        Returns:
+            Path: 更新後の input_dir。
+
+        Raises:
+            ValueError: 相対パスの場合、またはホームディレクトリ配下でない場合。
+        """
         p = Path(path).expanduser()
+        if not p.is_absolute():
+            raise ValueError("絶対パスを指定してください")
+        home = Path.home()
+        if not p.resolve().is_relative_to(home.resolve()):
+            raise ValueError("ホームディレクトリ配下のパスのみ指定できます")
         p.mkdir(parents=True, exist_ok=True)
         self.input_dir = p
         LOG.info("input_dir -> %s", p)

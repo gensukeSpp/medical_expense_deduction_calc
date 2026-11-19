@@ -20,14 +20,28 @@ REPO_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 # --- 設定: input_dir ---
 
 
-def test_set_input_dir_creates_directory(tmp_path):
+def test_set_input_dir_creates_directory(tmp_path, monkeypatch):
     """存在しない input_dir を指定すると mkdir され、状態が更新される"""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     ctl = WatchController(output_dir=str(tmp_path / "output"))
-    target = tmp_path / "nested" / "receipts"
+    target = home / "nested" / "receipts"
     result = ctl.set_input_dir(str(target))
     assert target.is_dir()
     assert ctl.input_dir == target
     assert result == target
+
+
+def test_set_input_dir_rejects_outside_home(tmp_path, monkeypatch):
+    """[中-4] 許可ルート（ホーム）外の input_dir は ValueError"""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    ctl = WatchController(output_dir=str(tmp_path / "output"))
+    with pytest.raises(ValueError, match="ホーム"):
+        ctl.set_input_dir(str(tmp_path / "outside"))
+    assert ctl.input_dir != tmp_path / "outside"
 
 
 def test_default_input_dir_is_downloads_receipts():
