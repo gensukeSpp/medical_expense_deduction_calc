@@ -1,6 +1,9 @@
+import sys
+
+
 def main():
     # 引数解析と初期化
-    from app.args import setup_args, setup_directories
+    from app.args import is_loopback_host, setup_args, setup_directories
 
     args = setup_args()
     input_dir, output_dir, processed_dir, failed_dir = setup_directories(args)
@@ -15,6 +18,15 @@ def main():
 
     # Web UI サーバー起動 (OCR は WatchController が遅延初期化するためここでは生成しない)
     if args.serve:
+        if not is_loopback_host(args.host):
+            # [中-4] 認証のない変更系エンドポイントがあるため、非 loopback 起動は拒否する
+            print(
+                f"エラー: ホスト {args.host} はループバックではありません。\n"
+                "このアプリには認証がなく、任意パス操作・DB 差し替え・画像コピーが可能です。\n"
+                "127.0.0.1 (localhost) でのみ起動してください。",
+                file=sys.stderr,
+            )
+            return
         import uvicorn
         from app.web.server import create_app
 

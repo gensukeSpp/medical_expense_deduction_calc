@@ -1,4 +1,5 @@
 import argparse
+import ipaddress
 import logging
 import os
 from pathlib import Path
@@ -84,3 +85,23 @@ def setup_directories(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]
     failed_dir.mkdir(parents=True, exist_ok=True)
 
     return input_dir, output_dir, processed_dir, failed_dir
+
+
+def is_loopback_host(host: str) -> bool:
+    """Web サーバの host がループバック（localhost / 127.0.0.1 / ::1 等）か判定する。
+
+    [中-4] 認証のない変更系エンドポイントを LAN に曝さないための起動ガード。
+    IP として解釈できないホスト名は非ループバック扱い（False）とする。
+
+    Args:
+        host: 判定するホスト名または IP アドレス。
+
+    Returns:
+        bool: ループバックなら True、それ以外 False。
+    """
+    if host in ("localhost", "::1"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
