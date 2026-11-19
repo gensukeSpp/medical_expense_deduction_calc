@@ -107,6 +107,9 @@ class WatchController:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._is_processing = False
+        # [中-3] 処理待ち（画像コピー後〜 structured 生成完了まで）の状態
+        self._pending_process = False
+        self._pending_image: str | None = None
         self.last_error: str | None = None
         self.set_preprocess_mode(preprocess_mode)
         if db_path:
@@ -201,6 +204,11 @@ class WatchController:
     def is_processing(self) -> bool:
         return self._is_processing
 
+    @property
+    def pending_process(self) -> bool:
+        """処理待ち（画像コピー後〜 structured 生成完了まで）かどうか。"""
+        return self._pending_process
+
     def _watch_loop(self) -> None:
         # [中-1] 開始時点の専用 Event を捕捉する（再開で差し替えられても影響しない）
         stop_event = self._stop_event
@@ -232,6 +240,26 @@ class WatchController:
         finally:
             self._is_processing = False
             self._scan_lock.release()
+            self._clear_pending_if_consumed()
+
+    def _clear_pending_if_consumed(self) -> None:
+        """処理待ち画像が処理済み（出力 JSON 生成 or failed 退避）なら pending を解除する。
+
+        [中-3] 読込不能画像（raw が生成されない）でも failed/ への退避があれば解除し、
+        画像指定が永久ロックされないようにする（既存の問題 1 との相互作用対策）。
+        """
+        if not self._pending_process or self._pending_image is None:
+            return
+        stem = Path(self._pending_image).stem
+        consumed = (
+            list(self.output_dir.glob(f"{stem}_*-raw_data.json"))
+            or list(self.output_dir.glob(f"{stem}_*-structured_data.json"))
+            or (self.failed_dir / self._pending_image).exists()
+        )
+        if consumed:
+            LOG.info("Pending image processed: %s", self._pending_image)
+            self._pending_image = None
+            self._pending_process = False
 
     def _get_ocr(self):
         """OCR エンジンの遅延初期化（スレッドセーフ）。テストでは ocr_factory を注入。"""
@@ -347,13 +375,29 @@ class WatchController:
         raise ValueError(f"保存先が見つかりません: {name}")
 
     def copy_image(self, filename: str, content: bytes) -> Path:
-        """アップロード画像を input_dir へコピーする（案C: コピーのみ・即時処理しない）。"""
+        """アップロード画像を input_dir へコピーする（案C: コピーのみ・即時処理しない）。
+
+        [中-3] コピー直後〜 structured 生成完了までを「処理待ち」状態として保持し、
+        スキャン 1 サイクルで消費されたら解除する。
+
+        Args:
+            filename: 元ファイル名（basename のみ利用する）。
+            content: ファイル内容。
+
+        Returns:
+            Path: コピー先のパス。
+
+        Raises:
+            ValueError: 画像ファイルでない場合。
+        """
         name = Path(filename).name
         if Path(name).suffix.lower() not in watcher.IMAGE_EXT:
             raise ValueError("画像ファイルのみ指定できます")
         self.input_dir.mkdir(parents=True, exist_ok=True)
         dest = self.input_dir / name
         dest.write_bytes(content)
+        self._pending_image = name
+        self._pending_process = True
         LOG.info("Copied uploaded image to %s", dest)
         return dest
 
@@ -366,6 +410,7 @@ class WatchController:
         return {
             "watch_on": self.watch_on,
             "is_processing": self.is_processing,
+            "pending": self.pending_process,
             "input_dir": str(self.input_dir),
             "db_path": self.db_path,
             "has_db": self.has_db,

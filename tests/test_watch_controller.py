@@ -217,6 +217,57 @@ def test_watch_loop_calls_scan_repeatedly(tmp_path):
     assert len(calls) >= 2
 
 
+# --- [中-3] 処理待ち状態 ---
+
+
+def test_copy_image_sets_pending(tmp_path):
+    """[中-3] 画像コピー直後は処理待ち（pending）状態になる"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    assert ctl.pending_process is True
+    assert ctl.get_status()["pending"] is True
+
+
+def test_scan_clears_pending_when_structured_generated(tmp_path):
+    """[中-3] structured_data 生成後は pending が解除される"""
+
+    def fake_scan(*args, **kwargs):
+        input_dir = Path(args[0])
+        output_dir = Path(args[2])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for p in input_dir.iterdir():
+            if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                out = output_dir / f"{p.stem}_123-structured_data.json"
+                if not out.exists():
+                    out.write_text('{"name": "山田 太郎"}', encoding="utf-8")
+        return 1
+
+    ctl = _make_ctl(tmp_path, scan_fn=fake_scan)
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    assert ctl.pending_process is True
+    ctl._run_scan()
+    assert ctl.pending_process is False
+    assert (ctl.output_dir / "IMG_001_123-structured_data.json").exists()
+
+
+def test_pending_cleared_when_image_moved_to_failed(tmp_path):
+    """[中-3] 処理待ち画像が failed_dir へ退避済みなら pending が解除される"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    ctl.failed_dir.mkdir(parents=True, exist_ok=True)
+    (ctl.failed_dir / "IMG_001.jpg").write_bytes(b"fake-jpeg-bytes")
+    ctl._run_scan()
+    assert ctl.pending_process is False
+
+
+def test_pending_stays_until_consumed(tmp_path):
+    """[中-3] スキャンが画像を処理しなかった場合は pending が維持される"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    ctl._run_scan()
+    assert ctl.pending_process is True
+
+
 # --- DB アップロード保存 ---
 
 
@@ -389,6 +440,7 @@ def test_get_status_shape(tmp_path):
     assert set(s) == {
         "watch_on",
         "is_processing",
+        "pending",
         "input_dir",
         "db_path",
         "has_db",
