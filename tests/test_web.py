@@ -845,6 +845,35 @@ def test_config_db_upload_keeps_existing_db(web_client, web_ctl, tmp_path):
     assert (web_ctl.data_dir / "db_1.sqlite3").exists()
 
 
+def test_config_db_upload_409_while_processing(web_client, web_ctl, tmp_path):
+    """[中-2] 処理中の DB 差し替えアップロードは 409"""
+    src = tmp_path / "swap.sqlite3"
+    run_migrations(src, SCHEMA_PATH)
+    web_ctl._is_processing = True
+    try:
+        resp = web_client.post(
+            "/config",
+            files={"db_file": ("swap.db", src.read_bytes(), "application/octet-stream")},
+            follow_redirects=False,
+        )
+    finally:
+        web_ctl._is_processing = False
+    assert resp.status_code == 409
+    assert not (web_ctl.data_dir / "swap.db").exists()
+
+
+def test_db_file_input_disabled_while_processing(web_client, web_ctl):
+    """[中-2] 処理中は db-file-input が disabled になる"""
+    web_ctl._is_processing = True
+    try:
+        page = web_client.get("/")
+        m = re.search(r'<input id="db-file-input"[^>]*>', page.text)
+        assert m is not None, "db-file-input タグが見つからない"
+        assert "disabled" in m.group(0)
+    finally:
+        web_ctl._is_processing = False
+
+
 def test_watch_start_without_db_400(tmp_path):
     """DB 未選択で watch start は 400（受け入れ要件 2）"""
     from app.services.watch_controller import WatchController

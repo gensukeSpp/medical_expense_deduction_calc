@@ -289,6 +289,9 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(e))
         db_file = form.get("db_file")
         if db_file is not None and getattr(db_file, "filename", ""):
+            # [中-2] 処理中の DB 差し替えは拒否（書き込み先 DB が途中で変わるため）
+            if controller.is_processing:
+                raise HTTPException(status_code=409, detail="処理中です。完了までお待ちください")
             try:
                 controller.save_db_upload(await db_file.read(), db_file.filename)
             except ValueError as e:
