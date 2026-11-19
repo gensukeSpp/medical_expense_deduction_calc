@@ -4,6 +4,7 @@ This directory contains dated snapshots of the project's high-level architecture
 
 | Date | Summary | File |
 | --- | --- | --- |
+| 2026-11-16 | Architecture snapshot for Web UI watch/configuration operations (Issue #56). | [2026-11-16-webui-operations.md](2026-11-16-webui-operations.md) |
 | 2026-11-12 | Architecture snapshot for monthly medical expense list viewing and total calculation (Issue #54 / PR #55). | [2026-11-12-architecture.md](2026-11-12-architecture.md) |
 | 2026-11-09 | Architecture snapshot for forced date-basis coordinate extraction fallback (Issue #50 / PR #53). | [2026-11-09-architecture.md](2026-11-09-architecture.md) |
 | 2026-06-12 | Date: 2026-06-12 | [2026-06-12-architecture.md](2026-06-12-architecture.md) |

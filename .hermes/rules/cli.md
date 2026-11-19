@@ -55,3 +55,21 @@ uv run python main.py --serve --port 8000 --db-path data/db.sqlite3
 
 - 引数定義: `app/args.py::setup_args()`
 - ディレクトリ初期化: `app/args.py::setup_directories()`
+
+## Web UI 運用 (Issue #56)
+
+- 起動: `uv run python main.py --serve [--port 8000] [--db-path data/db.sqlite3]`
+- `--serve` では OCR を遅延初期化するため起動が高速。PaddleOCR は初回スキャン時に生成
+- 操作パネルは**選択＝確定**（JS fetch で即時適用・画面遷移なし）:
+  - 指定フォルダ: パスを直接入力して「適用」（ブラウザのダイアログからはサーバ側パスが取得できないため）
+  - 前処理: セレクト変更で即適用（`none`/`clahe`/`adaptive`/`clahe+adaptive`）
+  - データベース: ファイル選択で即アップロード（`data/` へ保存 + migration 適用。失敗時はパネル内にエラー表示）
+    - 保存は「一時ファイル → 検証 → 原子的配置」の順。SQLite ヘッダと必須テーブル
+      （`receipts`/`clinics`/`templates`/`corrections`）を検証し、不正なら保存せず 400
+    - 同名の既存 DB は**上書き・削除しない**。連番（`my_1.db` 等）で別名保存する
+  - watch ON/OFF ボタン + 状態バー（2秒ポーリングで更新）
+- 画像アップロードは指定フォルダへ**コピーのみ**＋ watch 未 ON なら自動開始（処理は watch のポーリングが実施）
+- watch 開始・画像指定は DB 選択必須（未選択なら 400）
+- 処理中はファイル指定が disabled。新しい structured data 生成時に一覧が自動リロード
+- 状態はプロセス内メモリのみ（サーバ再起動でリセット）
+- `--serve` 時は他の処理オプションを無視する (PR #57)

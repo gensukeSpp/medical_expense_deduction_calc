@@ -1,12 +1,235 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
+    <meta charset="UTF-8">
     <title>抽出データ一覧</title>
+    <script>
+        let prevStructuredCount = {{ ctl.structured_count }};
+        let lastImageMessage = "";
+
+        function showError(msg) {
+            const e = document.getElementById('ctl-error');
+            if (e) { e.textContent = msg ? 'エラー: ' + msg : ''; }
+        }
+
+        async function fetchStatus() {
+            const resp = await fetch('/api/status');
+            return resp.json();
+        }
+
+        function applyStatus(s) {
+            const bar = document.getElementById('status-bar');
+            if (bar) {
+                bar.textContent = 'watch: ' + (s.watch_on ? 'ON' : 'OFF')
+                    + ' / process: ' + (s.is_processing ? '実行中' : '待機中')
+                    + (s.last_error ? ' / エラー: ' + s.last_error : '');
+            }
+            const wb = document.getElementById('watch-btn');
+            if (wb) {
+                wb.textContent = s.watch_on ? 'watch 停止' : 'watch ON';
+                wb.dataset.action = s.watch_on ? '/watch/stop' : '/watch/start';
+            }
+            const dh = document.getElementById('db-hint');
+            if (dh) {
+                if (s.has_db) {
+                    dh.textContent = '現在: ' + s.db_path;
+                    dh.style.color = '';
+                } else {
+                    dh.textContent = '未選択';
+                    dh.style.color = '#c00';
+                }
+            }
+            const imgInput = document.getElementById('image-input');
+            const imgBtn = document.getElementById('image-submit');
+            if (imgInput) { imgInput.disabled = s.is_processing; }
+            if (imgBtn) { imgBtn.disabled = s.is_processing; }
+            if (s.structured_count > prevStructuredCount) {
+                // 新しい structured data が生成されたときだけ一覧を更新（完了時のリンク表示）
+                if (lastImageMessage) {
+                    sessionStorage.setItem("ctl-image-result", lastImageMessage);
+                }
+                location.reload();
+                return;
+            }
+            prevStructuredCount = s.structured_count;
+        }
+
+        async function postForm(url, formData) {
+            const resp = await fetch(url, { method: 'POST', body: formData });
+            if (!resp.ok) {
+                let detail = String(resp.status);
+                try {
+                    const j = await resp.json();
+                    if (j.detail) { detail = j.detail; }
+                } catch (e) { /* JSON でなければステータス番号のまま */ }
+                throw new Error(detail);
+            }
+            return resp;
+        }
+
+        async function pollStatus() {
+            try {
+                applyStatus(await fetchStatus());
+            } catch (e) {
+                // サーバ停止中などは何もしない（次回ポーリングで復帰）
+            }
+            setTimeout(pollStatus, 2000);
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            // 処理完了リロード前の画像指定メッセージを復元する
+            const savedMsg = sessionStorage.getItem('ctl-image-result');
+            if (savedMsg) {
+                const r = document.getElementById('image-result');
+                if (r) { r.textContent = savedMsg; }
+                sessionStorage.removeItem('ctl-image-result');
+            }
+
+            // 指定フォルダ: 入力パスを適用（ブラウザのダイアログからはサーバ側パスが取得できないため直接入力）
+            const applyBtn = document.getElementById('input-dir-apply');
+            if (applyBtn) {
+                applyBtn.addEventListener('click', async () => {
+                    try {
+                        const fd = new FormData();
+                        fd.append('input_dir', document.getElementById('input-dir').value);
+                        fd.append('preprocess_mode', document.getElementById('preprocess-mode').value);
+                        await postForm('/config', fd);
+                        showError('');
+                        applyStatus(await fetchStatus());
+                    } catch (e) { showError(e.message); }
+                });
+            }
+
+            // 前処理: 選択変更で即適用
+            const modeSel = document.getElementById('preprocess-mode');
+            if (modeSel) {
+                modeSel.addEventListener('change', async () => {
+                    try {
+                        const fd = new FormData();
+                        fd.append('preprocess_mode', modeSel.value);
+                        await postForm('/config', fd);
+                        showError('');
+                    } catch (e) { showError(e.message); }
+                });
+            }
+
+            // データベース: ファイル選択で確定（即アップロード）
+            const dbInput = document.getElementById('db-file-input');
+            if (dbInput) {
+                dbInput.addEventListener('change', async () => {
+                    const f = dbInput.files[0];
+                    if (!f) { return; }
+                    try {
+                        const fd = new FormData();
+                        fd.append('db_file', f);
+                        await postForm('/config', fd);
+                        showError('');
+                        dbInput.value = '';  // 同じファイルを再選択できるように解除
+                        applyStatus(await fetchStatus());
+                    } catch (e) { showError(e.message); }
+                });
+            }
+
+            // watch ON/OFF ボタン
+            const watchBtn = document.getElementById('watch-btn');
+            if (watchBtn) {
+                watchBtn.addEventListener('click', async () => {
+                    try {
+                        await postForm(watchBtn.dataset.action, new FormData());
+                        showError('');
+                        applyStatus(await fetchStatus());
+                    } catch (e) { showError(e.message); }
+                });
+            }
+
+            // 画像指定: 読み込む → input_dir へコピー（watch 未 ON ならサーバ側で自動開始）
+            const imgBtn = document.getElementById('image-submit');
+            if (imgBtn) {
+                imgBtn.addEventListener('click', async () => {
+                    const imgInput = document.getElementById('image-input');
+                    const f = imgInput.files[0];
+                    if (!f) {
+                        showError('画像ファイルを選択してください');
+                        return;
+                    }
+                    try {
+                        const fd = new FormData();
+                        fd.append('image', f);
+                        await postForm('/images', fd);
+                        showError('');
+                        const s = await fetchStatus();
+                        applyStatus(s);
+                        const msg = s.watch_on
+                            ? 'コピーしました。watch が処理します（完了すると一覧にリンクが追加されます）。'
+                            : 'コピーしましたが watch が OFF のため処理されていません。';
+                        const result = document.getElementById('image-result');
+                        if (result) { result.textContent = msg; }
+                        lastImageMessage = msg;
+                    } catch (e) { showError(e.message); }
+                });
+            }
+
+            pollStatus();
+        });
+    </script>
 </head>
 <body>
     <h1>抽出データ一覧</h1>
     <p><a href="/admin/templates">テンプレート管理</a></p>
     <p><a href="/list">月別一覧（計算）</a></p>
+
+    <!-- 操作パネル (Issue #56): 一覧の上部。選択＝確定（JS で即時適用） -->
+    <div id="control-panel" style="border:1px solid #ccc; padding:12px; margin-bottom:12px;">
+        <div style="margin-bottom:8px;">
+            <label>指定フォルダ:
+                <input id="input-dir" type="text" value="{{ ctl.input_dir }}" size="50">
+            </label>
+            <button id="input-dir-apply" type="button">適用</button>
+            <span style="color:#888;">（サーバ側のパスを直接入力。ブラウザのダイアログからは取得できない）</span>
+        </div>
+
+        <div style="margin-bottom:8px;">
+            <label>前処理:
+                <select id="preprocess-mode">
+                    {% for m in ['none', 'clahe', 'adaptive', 'clahe+adaptive'] %}
+                    <option value="{{ m }}" {% if ctl.preprocess_mode == m %}selected{% endif %}>{{ m }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <span style="color:#888;">（選択すると即適用）</span>
+        </div>
+
+        <div style="margin-bottom:8px;">
+            <label>データベース:
+                <input id="db-file-input" type="file" name="db_file" accept=".db,.sqlite,.sqlite3">
+            </label>
+            <span id="db-hint">{% if ctl.has_db %}現在: {{ ctl.db_path }}{% else %}<span style="color:#c00;">未選択</span>{% endif %}</span>
+            <span style="color:#888;">（ファイル選択で確定）</span>
+        </div>
+
+        <div style="margin-bottom:8px;">
+            <button id="watch-btn" type="button" data-action="{% if ctl.watch_on %}/watch/stop{% else %}/watch/start{% endif %}">{{ 'watch 停止' if ctl.watch_on else 'watch ON' }}</button>
+        </div>
+
+        <div>
+            <label>画像指定:
+                <input id="image-input" type="file" name="image" accept="image/*"
+                       {% if ctl.is_processing %}disabled{% endif %}>
+            </label>
+            <button id="image-submit" type="button" {% if ctl.is_processing %}disabled{% endif %}>読み込む</button>
+            <span id="image-result" style="color:#060;"></span>
+            <span style="color:#888;">※ 複数ファイルを一度に読み込ませると精度が落ちます。1枚ずつお読み込みください。</span>
+        </div>
+
+        <div id="ctl-error" style="color:#c00; margin-top:6px;"></div>
+    </div>
+
+    <!-- 状態表示スペース (横いっぱい) -->
+    <div id="status-bar" style="width:100%; border:1px solid #ccc; padding:8px; margin-bottom:12px; box-sizing:border-box;">
+        watch: {{ 'ON' if ctl.watch_on else 'OFF' }} / process: {{ '実行中' if ctl.is_processing else '待機中' }}
+        {% if ctl.last_error %} / エラー: {{ ctl.last_error }}{% endif %}
+    </div>
+
     {% if items %}
         <table border="1">
             <thead>

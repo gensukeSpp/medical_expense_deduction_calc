@@ -49,6 +49,7 @@ Phase 1（読み込み、抽出、修正、キャッシュ）のみを実装。�
 │   │   ├── receipt_updater.py            # receipt 更新オーケストレーター
 │   │   ├── template_admin_service.py     # テンプレート管理・coord_basis 手動切替 [Issue #42]
 │   │   ├── receipt_list_service.py       # 月別一覧の文脈構築・補填額保存 [Issue #54]
+│   │   ├── watch_controller.py           # Web UI からの watch 操作 (Issue #56)
 │   │
 │   └── web/                   # Web UI (FastAPI + Jinja2)
 │       ├── server.py          # FastAPI アプリ作成
@@ -159,6 +160,7 @@ main.py -> structural_parser.process_input_json()
 使い方と引数一覧は変更頻度が高いため、`.hermes/rules/cli.md` に分離している。詳細は以下を参照:
 
 - [.hermes/rules/cli.md](./.hermes/rules/cli.md) — コマンド例・引数一覧・デフォルト値
+- Web UI 運用は `.hermes/rules/cli.md` の「Web UI 運用」節を参照
 
 主なコマンド例:
 

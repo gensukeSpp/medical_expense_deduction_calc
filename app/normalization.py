@@ -34,7 +34,10 @@ def parse_amount(text: str) -> Optional[int]:
     t = str(text).strip()
     if not t:
         return None
-    if "-" in t or "−" in t:
+    # 負の金額（先頭にマイナス記号を伴う数字）のみ無効とする。
+    # 郵便番号（123-4567）や電話番号（03-1234）など桁間のハイフンは負値ではないため、
+    # 全体拒否はしない（PR #55 導入時に全ハイフン入り文字列を誤拒否していた regression）。
+    if re.search(r"(?:^|[^0-9])[−\-]\s*\d", t):
         return None
 
     # normalize fullwidth digits and punctuation to ascii

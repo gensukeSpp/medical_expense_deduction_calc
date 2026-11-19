@@ -1,3 +1,7 @@
+import re
+import sqlite3
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 from pathlib import Path
@@ -154,8 +158,12 @@ def test_list_multiple_names_via_query(tmp_path):
     """複数の names パラメータでも、カンマ連結の古いクエリを安全に処理する"""
     out_dir = tmp_path / "output_json"
     out_dir.mkdir()
-    write_json_atomic(out_dir / "a-structured_data.json", {"name": "山田", "clinic": "A", "amount": 1000, "date": "2026-01-01"})
-    write_json_atomic(out_dir / "b-structured_data.json", {"name": "鈴木", "clinic": "B", "amount": 2000, "date": "2026-01-02"})
+    write_json_atomic(
+        out_dir / "a-structured_data.json", {"name": "山田", "clinic": "A", "amount": 1000, "date": "2026-01-01"}
+    )
+    write_json_atomic(
+        out_dir / "b-structured_data.json", {"name": "鈴木", "clinic": "B", "amount": 2000, "date": "2026-01-02"}
+    )
     app = create_app(output_dir=str(out_dir), db_path=None)
     with TestClient(app) as client:
         resp = client.get("/list/table?month=2026-01&names=%E5%B1%B1%E7%94%B0%2C%E9%88%B4%E6%9C%A8")
@@ -697,3 +705,348 @@ def test_list_detail_edit_keeps_compensation(tmp_path):
 
         saved = json.loads((out_dir / "r-structured_data.json").read_text(encoding="utf-8"))
         assert saved["compensation"] == 1000
+
+
+# --- Issue #56: Web UI からの watch・設定操作 ---
+
+
+@pytest.fixture
+def web_ctl(tmp_path):
+    """WatchController に fake scan_fn を注入して作成（PaddleOCR は起動しない）。"""
+    from app.services.watch_controller import WatchController
+
+    # CLI の setup_directories 相当: fake scan の書き込み先を用意する
+    (tmp_path / "output_json").mkdir()
+    (tmp_path / "data").mkdir()
+
+    def fake_scan(*args, **kwargs):
+        # input_dir の画像ごとに structured_data.json を 1 件生成する偽スキャン
+        input_dir = Path(args[0])
+        output_dir = Path(args[2])
+        for p in input_dir.iterdir():
+            if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                out = output_dir / f"{p.stem}_123-structured_data.json"
+                if not out.exists():
+                    out.write_text(
+                        '{"name": "山田 太郎", "clinic": "テスト医院", "amount": 1000, "date": "2026-01-15"}',
+                        encoding="utf-8",
+                    )
+        return 1
+
+    ctl = WatchController(
+        input_dir=str(tmp_path / "input"),
+        output_dir=str(tmp_path / "output_json"),
+        processed_dir=str(tmp_path / "processed"),
+        failed_dir=str(tmp_path / "failed"),
+        poll_interval=1,
+        scan_fn=fake_scan,
+        ocr_factory=lambda: object(),
+        data_dir=str(tmp_path / "data"),
+    )
+    return ctl
+
+
+@pytest.fixture
+def web_client(tmp_path, web_ctl):
+    """コントローラ注入済み TestClient。DB は web_ctl に migration 済み実ファイルを設定。"""
+    db = tmp_path / "web_db.sqlite3"
+    run_migrations(db, SCHEMA_PATH)
+    web_ctl.set_db_path(db)
+    app = create_app(output_dir=str(tmp_path / "output_json"), controller=web_ctl)
+    with TestClient(app) as c:
+        yield c
+
+
+def test_index_shows_control_panel(web_client):
+    """操作パネル（フォルダ / DB / watch / 前処理 / 画像指定 / 状態バー）が表示される"""
+    resp = web_client.get("/")
+    assert resp.status_code == 200
+    assert "指定フォルダ" in resp.text
+    assert "データベース" in resp.text
+    assert "前処理" in resp.text
+    assert "watch" in resp.text
+    assert "画像指定" in resp.text
+    assert "status-bar" in resp.text
+    assert "clahe+adaptive" in resp.text  # 前処理セレクトの選択肢
+    # 複数ファイル注意書き
+    assert "1枚ずつ" in resp.text
+
+
+def test_config_updates_input_dir_and_mode(web_client, tmp_path):
+    """POST /config で input_dir / preprocess_mode が反映される"""
+    new_dir = tmp_path / "another"
+    resp = web_client.post(
+        "/config",
+        data={"input_dir": str(new_dir), "preprocess_mode": "clahe"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/"
+    page = web_client.get("/")
+    assert str(new_dir) in page.text
+    assert 'value="clahe" selected' in page.text
+
+
+def test_config_rejects_unknown_mode(web_client):
+    resp = web_client.post("/config", data={"preprocess_mode": "bogus"})
+    assert resp.status_code == 400
+
+
+def test_config_db_upload_saves_and_migrates(web_client, web_ctl, tmp_path):
+    """DB ファイルのアップロードで data/ に保存され has_db になる（Q2 案A）"""
+    src = tmp_path / "upload_src.sqlite3"
+    run_migrations(src, SCHEMA_PATH)
+    resp = web_client.post(
+        "/config",
+        files={"db_file": ("my_upload.db", src.read_bytes(), "application/octet-stream")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert (web_ctl.data_dir / "my_upload.db").exists()
+    assert web_client.get("/api/status").json()["has_db"] is True
+
+
+def test_config_db_upload_invalid_returns_400(web_client, web_ctl):
+    """不正な DB ファイルは 400（詳細メッセージ付き）で保存されない"""
+    resp = web_client.post(
+        "/config",
+        files={"db_file": ("bad.db", b"not a sqlite db", "application/octet-stream")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 400
+    assert not (web_ctl.data_dir / "bad.db").exists()
+
+
+def test_config_db_upload_keeps_existing_db(web_client, web_ctl, tmp_path):
+    """[高-1] 既存同名 DB へのアップロードで既存 DB は上書き・削除されない"""
+    existing = web_ctl.data_dir / "db.sqlite3"
+    run_migrations(existing, SCHEMA_PATH)
+    conn = sqlite3.connect(str(existing))
+    conn.execute("CREATE TABLE IF NOT EXISTS marker (value TEXT)")
+    conn.execute("INSERT INTO marker (value) VALUES ('original')")
+    conn.commit()
+    conn.close()
+
+    src = tmp_path / "src.sqlite3"
+    run_migrations(src, SCHEMA_PATH)
+    resp = web_client.post(
+        "/config",
+        files={"db_file": ("db.sqlite3", src.read_bytes(), "application/octet-stream")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    # 既存 DB は保持される
+    conn = sqlite3.connect(str(existing))
+    try:
+        assert [r[0] for r in conn.execute("SELECT value FROM marker")] == ["original"]
+    finally:
+        conn.close()
+    # 新しい内容は別名で保存される
+    assert (web_ctl.data_dir / "db_1.sqlite3").exists()
+
+
+def test_watch_start_without_db_400(tmp_path):
+    """DB 未選択で watch start は 400（受け入れ要件 2）"""
+    from app.services.watch_controller import WatchController
+
+    ctl = WatchController(
+        input_dir=str(tmp_path / "input"),
+        output_dir=str(tmp_path / "output_json"),
+        scan_fn=lambda *a, **k: 0,
+        ocr_factory=lambda: object(),
+    )
+    app = create_app(output_dir=str(tmp_path / "output_json"), controller=ctl)
+    with TestClient(app) as c:
+        resp = c.post("/watch/start")
+        assert resp.status_code == 400
+        assert "データベース" in resp.json()["detail"]
+
+
+def test_watch_start_stop_toggles(web_client):
+    """watch start → status.watch_on=True、stop → False"""
+    resp = web_client.post("/watch/start", follow_redirects=False)
+    assert resp.status_code == 303
+    assert web_client.get("/api/status").json()["watch_on"] is True
+    web_client.post("/watch/stop", follow_redirects=False)
+    assert web_client.get("/api/status").json()["watch_on"] is False
+
+
+def test_upload_image_without_db_400(tmp_path):
+    """DB 未選択で画像アップロードは 400（受け入れ要件 2）"""
+    from app.services.watch_controller import WatchController
+
+    ctl = WatchController(
+        input_dir=str(tmp_path / "input"),
+        output_dir=str(tmp_path / "output_json"),
+        scan_fn=lambda *a, **k: 0,
+        ocr_factory=lambda: object(),
+    )
+    app = create_app(output_dir=str(tmp_path / "output_json"), controller=ctl)
+    with TestClient(app) as c:
+        resp = c.post("/images", files={"image": ("IMG_001.jpg", b"jpeg", "image/jpeg")})
+        assert resp.status_code == 400
+
+
+def test_upload_image_copies_to_input_dir(web_client, web_ctl):
+    """画像アップロードは input_dir へコピーされる（案C: 即時処理しない）"""
+    resp = web_client.post(
+        "/images",
+        files={"image": ("IMG_001.jpg", b"fake-jpeg-bytes", "image/jpeg")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    dest = web_ctl.input_dir / "IMG_001.jpg"
+    assert dest.exists()
+    assert dest.read_bytes() == b"fake-jpeg-bytes"
+
+
+def test_upload_rejects_non_image(web_client):
+    resp = web_client.post(
+        "/images",
+        files={"image": ("notes.txt", b"hello", "text/plain")},
+    )
+    assert resp.status_code == 400
+
+
+def test_status_endpoint_json(web_client, web_ctl):
+    s = web_client.get("/api/status").json()
+    assert s["watch_on"] is False
+    assert s["has_db"] is True
+    assert s["preprocess_mode"] == "none"
+    assert "input_dir" in s
+    assert s["structured_count"] == 0
+    # structured data が増えるとカウントが増える（完了検知の基準）
+    web_ctl.output_dir.mkdir(parents=True, exist_ok=True)
+    (web_ctl.output_dir / "r-structured_data.json").write_text("{}", encoding="utf-8")
+    s2 = web_client.get("/api/status").json()
+    assert s2["structured_count"] == 1
+
+
+def test_watch_picks_up_uploaded_image(web_client, web_ctl):
+    """watch ON 中にアップロードした画像がポーリングで処理され一覧にリンクが出る"""
+    web_client.post("/watch/start", follow_redirects=False)
+    # スキャン中に POST すると処理中ガード(409)で弾かれるため、アイドル時までリトライする
+    resp = None
+    for _ in range(30):
+        resp = web_client.post(
+            "/images",
+            files={"image": ("IMG_002.jpg", b"fake-jpeg-bytes", "image/jpeg")},
+            follow_redirects=False,
+        )
+        if resp.status_code != 409:
+            break
+        time.sleep(0.1)
+    assert resp.status_code == 303
+    # ポーリングが拾って structured_data.json を生成するまで待つ
+    out_dir = web_ctl.output_dir
+    deadline = 0
+    structured = None
+    while deadline < 100:
+        matches = list(out_dir.glob("*structured_data.json"))
+        if matches:
+            structured = matches[0]
+            break
+        time.sleep(0.1)
+        deadline += 1
+    assert structured is not None, "structured_data.json が生成されない"
+    page = web_client.get("/")
+    assert "IMG_002" in page.text  # 一覧にリンクが追加されている
+    web_client.post("/watch/stop", follow_redirects=False)
+
+
+def test_config_db_only_upload(web_client, tmp_path):
+    """DB ファイルのみの /config 送信（選択即確定の JS が送る形）で has_db になる"""
+    from app.db_migrations import run_migrations
+
+    src = tmp_path / "only_db.sqlite3"
+    run_migrations(src, SCHEMA_PATH)
+    resp = web_client.post(
+        "/config",
+        files={"db_file": ("auto.db", src.read_bytes(), "application/octet-stream")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert web_client.get("/api/status").json()["has_db"] is True
+
+
+def test_images_upload_requires_file(web_client):
+    """画像なしの /images は 400"""
+    resp = web_client.post("/images", data={}, follow_redirects=False)
+    assert resp.status_code == 400
+
+
+def test_images_upload_autostarts_watch(web_client, web_ctl):
+    """画像読み込み成功時に watch が自動開始する（選択＝確定の期待に応える）"""
+    try:
+        resp = web_client.post(
+            "/images",
+            files={"image": ("IMG_003.jpg", b"fake-jpeg-bytes", "image/jpeg")},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert web_client.get("/api/status").json()["watch_on"] is True
+    finally:
+        web_ctl.stop_watch()
+
+
+# --- Issue #56: index.html 表示（操作パネル / 状態バー / ポーリング JS） ---
+
+
+def test_file_input_disabled_while_processing(web_client, web_ctl):
+    """処理中は <input type='file'> が disabled になる（受け入れ要件 3）"""
+    web_ctl._is_processing = True
+    try:
+        page = web_client.get("/")
+        m = re.search(r'<input id="image-input"[^>]*>', page.text)
+        assert m is not None, "image-input タグが見つからない"
+        assert "disabled" in m.group(0)
+    finally:
+        web_ctl._is_processing = False
+
+
+def test_file_input_enabled_after_processing(web_client, web_ctl):
+    """処理完了後は disabled が外れる（watch 状態は維持）"""
+    page = web_client.get("/")
+    m = re.search(r'<input id="image-input"[^>]*>', page.text)
+    assert m is not None
+    assert "disabled" not in m.group(0)
+
+
+def test_index_shows_db_unselected_hint(tmp_path):
+    """DB 未選択時は「未選択」表示（エラー誘導）"""
+    from app.services.watch_controller import WatchController
+
+    ctl = WatchController(
+        input_dir=str(tmp_path / "input"),
+        output_dir=str(tmp_path / "output_json"),
+        scan_fn=lambda *a, **k: 0,
+        ocr_factory=lambda: object(),
+    )
+    app = create_app(output_dir=str(tmp_path / "output_json"), controller=ctl)
+    with TestClient(app) as c:
+        page = c.get("/")
+        assert "未選択" in page.text
+
+
+def test_index_has_status_poll_script(web_client):
+    """ページに /api/status のポーリング JS が含まれる"""
+    page = web_client.get("/")
+    assert "/api/status" in page.text
+    assert "pollStatus" in page.text
+
+
+def test_index_has_auto_apply_elements(web_client):
+    """選択即確定 UI の要素 id と fetch 配線が含まれる（Issue #56 UX 修正）"""
+    page = web_client.get("/").text
+    for needle in (
+        'id="db-file-input"',
+        'id="db-hint"',
+        'id="watch-btn"',
+        'id="image-result"',
+        'id="input-dir-apply"',
+        'id="ctl-error"',
+        "postForm('/config'",
+        "postForm('/images'",
+        'accept=".db,.sqlite,.sqlite3"',
+    ):
+        assert needle in page, f"{needle} が index.html に含まれない"
