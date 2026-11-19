@@ -320,7 +320,8 @@ def create_app(
         """画像を指定フォルダへコピーする（案C: コピーのみ。処理は watch のポーリングが行う）"""
         if not controller.has_db:
             raise HTTPException(status_code=400, detail="データベースを選択してください")
-        if controller.is_processing:
+        # [中-3] 処理中または処理待ち（コピー後〜 structured 生成完了）は 409
+        if controller.is_processing or controller.pending_process:
             raise HTTPException(status_code=409, detail="処理中です。完了までお待ちください")
         form = await request.form()
         image = form.get("image")
@@ -329,6 +330,9 @@ def create_app(
         content = await image.read()
         try:
             controller.copy_image(image.filename, content)
+        except FileExistsError as e:
+            # [中-5] 同名の既存画像は上書きせず 409
+            raise HTTPException(status_code=409, detail=str(e))
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         # 案C（コピーのみ・即時処理しない）を維持しつつ、ポーリング監視を即始動させることで

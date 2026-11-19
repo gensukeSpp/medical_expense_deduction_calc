@@ -41,8 +41,8 @@
             }
             const imgInput = document.getElementById('image-input');
             const imgBtn = document.getElementById('image-submit');
-            if (imgInput) { imgInput.disabled = s.is_processing; }
-            if (imgBtn) { imgBtn.disabled = s.is_processing; }
+            if (imgInput) { imgInput.disabled = s.is_processing || s.pending; }
+            if (imgBtn) { imgBtn.disabled = s.is_processing || s.pending; }
             const dbInput = document.getElementById('db-file-input');
             if (dbInput) { dbInput.disabled = s.is_processing; }
             if (s.structured_count > prevStructuredCount) {
@@ -217,9 +217,9 @@
         <div>
             <label>画像指定:
                 <input id="image-input" type="file" name="image" accept="image/*"
-                       {% if ctl.is_processing %}disabled{% endif %}>
+                       {% if ctl.is_processing or ctl.pending %}disabled{% endif %}>
             </label>
-            <button id="image-submit" type="button" {% if ctl.is_processing %}disabled{% endif %}>読み込む</button>
+            <button id="image-submit" type="button" {% if ctl.is_processing or ctl.pending %}disabled{% endif %}>読み込む</button>
             <span id="image-result" style="color:#060;"></span>
             <span style="color:#888;">※ 複数ファイルを一度に読み込ませると精度が落ちます。1枚ずつお読み込みください。</span>
         </div>

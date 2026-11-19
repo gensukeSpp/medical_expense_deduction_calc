@@ -929,6 +929,55 @@ def test_upload_image_copies_to_input_dir(web_client, web_ctl):
     assert dest.read_bytes() == b"fake-jpeg-bytes"
 
 
+def test_images_409_while_pending(web_client, web_ctl):
+    """[中-3] 処理待ち中の画像アップロードは 409（仕様上の拒否）"""
+    web_ctl._pending_process = True
+    try:
+        resp = web_client.post(
+            "/images",
+            files={"image": ("IMG_009.jpg", b"fake-jpeg-bytes", "image/jpeg")},
+            follow_redirects=False,
+        )
+    finally:
+        web_ctl._pending_process = False
+    assert resp.status_code == 409
+
+
+def test_image_input_disabled_while_pending(web_client, web_ctl):
+    """[中-3] 処理待ち中は image-input が disabled になる"""
+    web_ctl._pending_process = True
+    try:
+        page = web_client.get("/")
+        m = re.search(r'<input id="image-input"[^>]*>', page.text)
+        assert m is not None, "image-input タグが見つからない"
+        assert "disabled" in m.group(0)
+    finally:
+        web_ctl._pending_process = False
+
+
+def test_upload_image_409_on_duplicate_name(web_client, web_ctl):
+    """[中-5] 同名画像の再アップロードは 409 で上書きされない"""
+    r1 = web_client.post(
+        "/images",
+        files={"image": ("IMG_004.jpg", b"first-bytes", "image/jpeg")},
+        follow_redirects=False,
+    )
+    assert r1.status_code == 303
+    # 1 回目のコピーで pending になるため、スキャンで消費させてから再アップロードする。
+    # /images は watch を自動開始するため、scan lock の競合を避けて watch を停止してから手動スキャンする。
+    web_ctl.stop_watch()
+    web_ctl._run_scan()
+    assert web_ctl.pending_process is False
+    r2 = web_client.post(
+        "/images",
+        files={"image": ("IMG_004.jpg", b"second-bytes", "image/jpeg")},
+        follow_redirects=False,
+    )
+    assert r2.status_code == 409
+    assert "同名" in r2.json()["detail"]
+    assert (web_ctl.input_dir / "IMG_004.jpg").read_bytes() == b"first-bytes"
+
+
 def test_upload_rejects_non_image(web_client):
     resp = web_client.post(
         "/images",
