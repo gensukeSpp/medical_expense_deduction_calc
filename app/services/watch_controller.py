@@ -163,22 +163,34 @@ class WatchController:
     # ------------------------------------------------------------------
 
     def start_watch(self) -> None:
-        """ポーリング監視スレッドを開始する。DB 未選択は ValueError。"""
+        """ポーリング監視スレッドを開始する。DB 未選択は ValueError。
+
+        [中-1] スレッドごとに専用の stop Event を生成する。旧スレッドの
+        停止要求（stop_event）は clear しないため、停止→再開で二重化しない。
+        旧スレッドが生存中（stop_watch が join timeout した直後）は
+        watch_on が True のためここに到達しない（二重起動の防止）。
+        """
         if not self.has_db:
             raise ValueError("データベースを選択してください")
         if self.watch_on:
             return
-        self._stop_event.clear()
+        self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._watch_loop, name="web-watcher", daemon=True)
         self._thread.start()
         LOG.info("watch started (poll_interval=%d)", self.poll_interval)
 
     def stop_watch(self) -> None:
-        """監視スレッドを停止する。スキャン中の場合は timeout で戻る（daemon）。"""
+        """監視スレッドを停止する。
+
+        [中-1] スキャン中で join timeout した場合は、生存中の _thread を
+        保持する（watch_on が True のまま）。停止要求は専用 Event に出して
+        あるため、スキャン完了後にスレッドは自己終了する。
+        """
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=self.poll_interval + 5)
-            self._thread = None
+            if not self._thread.is_alive():
+                self._thread = None
         LOG.info("watch stopped")
 
     @property
@@ -190,9 +202,11 @@ class WatchController:
         return self._is_processing
 
     def _watch_loop(self) -> None:
-        while not self._stop_event.is_set():
+        # [中-1] 開始時点の専用 Event を捕捉する（再開で差し替えられても影響しない）
+        stop_event = self._stop_event
+        while not stop_event.is_set():
             self._run_scan()
-            self._stop_event.wait(self.poll_interval)
+            stop_event.wait(self.poll_interval)
 
     def _run_scan(self) -> None:
         """input_dir をスキャンして処理する。既に処理中ならスキップ。"""

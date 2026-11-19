@@ -104,6 +104,40 @@ def test_start_watch_requires_db(tmp_path):
     assert ctl.watch_on is False
 
 
+def test_stop_restart_no_duplicate_thread(tmp_path):
+    """[中-1] 停止→再開で監視スレッドが二重化しない"""
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_scan(*args, **kwargs):
+        entered.set()
+        release.wait(timeout=10)
+
+    ctl = _make_ctl(tmp_path, scan_fn=slow_scan, poll_interval=0.1)
+    ctl.start_watch()
+    old = ctl._thread
+    assert old is not None
+    assert entered.wait(timeout=5)
+    # スキャン中に停止 → join timeout で戻るが、生存中の _thread は保持される
+    ctl.stop_watch()
+    assert ctl.watch_on is True
+    # 生存中に再開しても新スレッドは作られない（二重化防止）
+    ctl.start_watch()
+    assert ctl._thread is old
+    # スキャン完了 → 専用 stop Event により旧スレッドが自己終了する
+    release.set()
+    old.join(timeout=5)
+    assert not old.is_alive()
+    assert ctl.watch_on is False
+    # 再開できる（新スレッド 1 本だけ）
+    ctl.start_watch()
+    assert ctl._thread is not old
+    assert ctl.watch_on is True
+    alive = [t for t in threading.enumerate() if t.name == "web-watcher" and t.is_alive()]
+    assert len(alive) == 1
+    ctl.stop_watch()
+
+
 def test_start_stop_watch_toggles(tmp_path):
     """start で watch_on=True、stop で False に戻る"""
     ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
