@@ -233,6 +233,30 @@ def test_watch_loop_calls_scan_repeatedly(tmp_path):
     assert len(calls) >= 2
 
 
+def test_scan_evicts_unreadable_and_clears_processing(tmp_path):
+    """Issue #60: _run_scan 完了で is_processing が解除され、読込不能画像が input から消える"""
+    input_dir = tmp_path / "input"
+    failed_dir = tmp_path / "failed"
+    input_dir.mkdir()
+    broken = input_dir / "broken.jpg"
+    broken.write_bytes(b"\x00\x01\x02 not a real image")
+
+    # fake scan: _sync_process の失敗退避（move）を再現する
+    def fake_scan(in_dir, ocr, out_dir, proc_dir, fail_dir, **kwargs):
+        for img in in_dir.iterdir():
+            if img.name == "broken.jpg":
+                fail_dir.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(img), str(fail_dir / img.name))
+
+    ctl = _make_ctl(tmp_path, scan_fn=fake_scan, poll_interval=0.05)
+    ctl._run_scan()
+
+    assert ctl.is_processing is False
+    assert not (input_dir / "broken.jpg").exists()  # input から取り除かれた
+    assert (failed_dir / "broken.jpg").exists()  # failed/ へ退避された
+    ctl.stop_watch()
+
+
 # --- [中-3] 処理待ち状態 ---
 
 
