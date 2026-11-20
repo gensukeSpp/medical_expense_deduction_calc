@@ -58,15 +58,15 @@ class FileRepository:
         LOG.info("Moved %s to processed: %s", p, dest)
 
     def move_to_failed(self, p: Path) -> None:
-        """失敗したファイルを失敗ディレクトリへ退避する。"""
+        """失敗したファイルを失敗ディレクトリへ退避する（input から取り除く）。"""
         try:
             dest = self.failed_dir / p.name
             if dest.exists():
                 dest = self.failed_dir / f"{int(time.time())}_{p.name}"
-            shutil.copy2(str(p), str(dest))
-            LOG.info("Copied failed %s -> %s", p, dest)
+            shutil.move(str(p), str(dest))
+            LOG.info("Moved failed %s -> %s", p, dest)
         except Exception:
-            LOG.exception("Failed to copy failed file %s", p)
+            LOG.exception("Failed to move failed file %s", p)
 
     def cleanup_file(self, p: Path) -> None:
         """一時ファイルなどを削除する。"""
