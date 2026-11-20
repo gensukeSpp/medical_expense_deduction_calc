@@ -721,11 +721,13 @@ def web_ctl(tmp_path):
 
     def fake_scan(*args, **kwargs):
         # input_dir の画像ごとに structured_data.json を 1 件生成する偽スキャン
+        # [PR59-中1] 出力名は実 mtime を埋め込む（本物の receipt_processor と同じ命名）
         input_dir = Path(args[0])
         output_dir = Path(args[2])
         for p in input_dir.iterdir():
             if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
-                out = output_dir / f"{p.stem}_123-structured_data.json"
+                mtime = int(p.stat().st_mtime)
+                out = output_dir / f"{p.stem}_{mtime}-structured_data.json"
                 if not out.exists():
                     out.write_text(
                         '{"name": "山田 太郎", "clinic": "テスト医院", "amount": 1000, "date": "2026-01-15"}',

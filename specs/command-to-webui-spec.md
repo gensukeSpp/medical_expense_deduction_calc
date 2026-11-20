@@ -30,7 +30,12 @@ CLI コマンド主体の操作を Web UI（`--serve` のみ）で完結させ�
 watch_on / is_processing / pending / input_dir / db_path / preprocess_mode / poll_interval(5s) / last_error / structured_count
 
 - `pending`: 画像コピー後〜 structured data 生成完了までの「処理待ち」状態。解除条件は
-  出力 JSON 生成 or failed/ への退避（読込不能画像でも永久ロックしない）
+  「その画像」の成果物確認（PR #59 レビュー [中]#1）:
+  - 出力 JSON: `{stem}_{コピー時 mtime}-raw_data.json` / `{stem}_{コピー時 mtime}-structured_data.json`
+    の完全一致（stem glob ではない。過去の同名出力では解除されない）
+  - failed/ への退避: コピー時 mtime+size 一致のファイル（copy2 が mtime を保存する前提。
+    同名 failed は `{timestamp}_` プレフィクス付きのため名前一致では特定できない）
+  - 読込不能画像でも failed 退避があれば解除し、永久ロックしない
 
 ## 決定事項
 | 項目 | 決定 | 理由 |

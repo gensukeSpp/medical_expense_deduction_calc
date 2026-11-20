@@ -123,6 +123,9 @@ class WatchController:
         # [中-3] 処理待ち（画像コピー後〜 structured 生成完了まで）の状態
         self._pending_process = False
         self._pending_image: str | None = None
+        # [PR59-中1] コピー時スナップショット（その画像固有の成果物を特定する基準）
+        self._pending_mtime: int | None = None
+        self._pending_size: int | None = None
         self.last_error: str | None = None
         self.set_preprocess_mode(preprocess_mode)
         if db_path:
@@ -293,24 +296,59 @@ class WatchController:
             self._clear_pending_if_consumed()
             self._scan_lock.release()
 
+    def _reset_pending(self) -> None:
+        """pending 状態とスナップショットをまとめてクリアする。"""
+        self._pending_image = None
+        self._pending_process = False
+        self._pending_mtime = None
+        self._pending_size = None
+
+    def _failed_copy_exists(self) -> bool:
+        """pending 画像の失敗退避（mtime+size 一致）が failed_dir にあるか判定する。
+
+        move_to_failed は shutil.copy2 のため mtime が保存される。同名 failed が既に
+        ある場合は {timestamp}_ プレフィクスが付くため、名前一致ではなく mtime+size で
+        特定する。
+        """
+        if self._pending_mtime is None or self._pending_size is None:
+            return False
+        if not self.failed_dir.is_dir():
+            return False
+        for f in self.failed_dir.iterdir():
+            if not f.is_file():
+                continue
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            if int(st.st_mtime) == self._pending_mtime and st.st_size == self._pending_size:
+                return True
+        return False
+
     def _clear_pending_if_consumed(self) -> None:
         """処理待ち画像が処理済み（出力 JSON 生成 or failed 退避）なら pending を解除する。
 
         [中-3] 読込不能画像（raw が生成されない）でも failed/ への退避があれば解除し、
         画像指定が永久ロックされないようにする（既存の問題 1 との相互作用対策）。
+
+        [PR59-中1] ファイル名（stem）の glob 一致ではなく、コピー時に記録した
+        mtime+size スナップショットで「その画像」の成果物を特定する。過去の同名出力や
+        過去の failed コピーでは解除されない。
         """
         if not self._pending_process or self._pending_image is None:
             return
+        if self._pending_mtime is None or self._pending_size is None:
+            return  # スナップショット未記録（旧状態）は解除しない
         stem = Path(self._pending_image).stem
+        mtime = self._pending_mtime
         consumed = (
-            list(self.output_dir.glob(f"{stem}_*-raw_data.json"))
-            or list(self.output_dir.glob(f"{stem}_*-structured_data.json"))
-            or (self.failed_dir / self._pending_image).exists()
+            (self.output_dir / f"{stem}_{mtime}-raw_data.json").exists()
+            or (self.output_dir / f"{stem}_{mtime}-structured_data.json").exists()
+            or self._failed_copy_exists()
         )
         if consumed:
             LOG.info("Pending image processed: %s", self._pending_image)
-            self._pending_image = None
-            self._pending_process = False
+            self._reset_pending()
 
     def _get_ocr(self):
         """OCR エンジンの遅延初期化（スレッドセーフ）。テストでは ocr_factory を注入。"""
@@ -484,6 +522,10 @@ class WatchController:
                 raise
             self._pending_image = name
             self._pending_process = True
+            # [PR59-中1] コピー時スナップショットを記録する（解除判定の基準）
+            st = dest.stat()
+            self._pending_mtime = int(st.st_mtime)
+            self._pending_size = st.st_size
             LOG.info("Copied uploaded image to %s", dest)
             return dest
         finally:

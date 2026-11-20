@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -251,7 +253,8 @@ def test_scan_clears_pending_when_structured_generated(tmp_path):
         output_dir.mkdir(parents=True, exist_ok=True)
         for p in input_dir.iterdir():
             if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
-                out = output_dir / f"{p.stem}_123-structured_data.json"
+                mtime = int(p.stat().st_mtime)
+                out = output_dir / f"{p.stem}_{mtime}-structured_data.json"
                 if not out.exists():
                     out.write_text('{"name": "山田 太郎"}', encoding="utf-8")
         return 1
@@ -259,9 +262,11 @@ def test_scan_clears_pending_when_structured_generated(tmp_path):
     ctl = _make_ctl(tmp_path, scan_fn=fake_scan)
     ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
     assert ctl.pending_process is True
+    mtime = ctl._pending_mtime
+    assert mtime is not None
     ctl._run_scan()
     assert ctl.pending_process is False
-    assert (ctl.output_dir / "IMG_001_123-structured_data.json").exists()
+    assert (ctl.output_dir / f"IMG_001_{mtime}-structured_data.json").exists()
 
 
 def test_pending_cleared_when_image_moved_to_failed(tmp_path):
@@ -269,7 +274,8 @@ def test_pending_cleared_when_image_moved_to_failed(tmp_path):
     ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
     ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
     ctl.failed_dir.mkdir(parents=True, exist_ok=True)
-    (ctl.failed_dir / "IMG_001.jpg").write_bytes(b"fake-jpeg-bytes")
+    # move_to_failed は copy2 のため mtime が保存される前提で退避を再現する
+    shutil.copy2(ctl.input_dir / "IMG_001.jpg", ctl.failed_dir / "IMG_001.jpg")
     ctl._run_scan()
     assert ctl.pending_process is False
 
@@ -280,6 +286,53 @@ def test_pending_stays_until_consumed(tmp_path):
     ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
     ctl._run_scan()
     assert ctl.pending_process is True
+
+
+def test_pending_not_cleared_by_old_output(tmp_path):
+    """[PR59-中1] 過去の同名出力が残っていても、新しい画像が未処理なら pending は解除されない"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    # 過去のアップロードで生成された出力（旧 mtime）を事前作成
+    ctl.output_dir.mkdir(parents=True, exist_ok=True)
+    (ctl.output_dir / "IMG_001_9999999999-structured_data.json").write_text('{"name": "過去"}', encoding="utf-8")
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    assert ctl.pending_process is True
+    ctl._run_scan()  # スキャンは何も処理しない
+    assert ctl.pending_process is True  # 過去出力では解除されない
+
+
+def test_pending_not_cleared_by_old_failed_copy(tmp_path):
+    """[PR59-中1] 過去の failed コピー（mtime 不一致）では pending は解除されない"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    ctl.failed_dir.mkdir(parents=True, exist_ok=True)
+    # 過去の失敗退避（mtime が古い）を事前作成
+    old = ctl.failed_dir / "IMG_001.jpg"
+    old.write_bytes(b"old-failed-bytes")
+    os.utime(old, (1_000_000_000, 1_000_000_000))  # 2001 年相当の旧 mtime
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    ctl._run_scan()
+    assert ctl.pending_process is True
+
+
+def test_pending_cleared_by_new_output_with_matching_mtime(tmp_path):
+    """[PR59-中1] コピー時 mtime と一致する出力が生成されたら pending が解除される"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    mtime = ctl._pending_mtime
+    assert mtime is not None
+    ctl.output_dir.mkdir(parents=True, exist_ok=True)
+    (ctl.output_dir / f"IMG_001_{mtime}-structured_data.json").write_text('{"name": "山田 太郎"}', encoding="utf-8")
+    ctl._run_scan()
+    assert ctl.pending_process is False
+
+
+def test_pending_cleared_by_failed_copy_with_matching_mtime(tmp_path):
+    """[PR59-中1] mtime+size 一致の failed コピーで pending が解除される"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    ctl.failed_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ctl.input_dir / "IMG_001.jpg", ctl.failed_dir / "IMG_001.jpg")
+    ctl._run_scan()
+    assert ctl.pending_process is False
 
 
 # --- DB アップロード保存 ---
@@ -451,8 +504,7 @@ def test_copy_image_rejects_existing_same_name(tmp_path):
     ctl.copy_image("IMG_001.jpg", b"first-bytes")
     # [PR59-中3] pending ガードが copy_image 内へ移ったため、
     # スキャンによる消費を模擬して pending を解除してから再アップロードする
-    ctl._pending_process = False
-    ctl._pending_image = None
+    ctl._reset_pending()
     with pytest.raises(FileExistsError):
         ctl.copy_image("IMG_001.jpg", b"second-bytes")
     # 原画像は失われない
