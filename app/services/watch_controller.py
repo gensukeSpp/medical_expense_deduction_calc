@@ -15,6 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from app import watcher
+from app.args import validate_input_dir
 
 LOG = logging.getLogger(__name__)
 
@@ -27,6 +28,18 @@ SCHEMA_PATH = Path("docs/schema.sql")
 SQLITE_MAGIC = b"SQLite format 3\x00"
 # アップロードされた DB に必須のテーブル（存在しない場合は拒否する）
 REQUIRED_TABLES = ("receipts", "clinics", "templates", "corrections")
+
+# [PR59-中3] スキャン処理中の変更拒否メッセージ（/images・/config の 409 detail と同じ）
+BUSY_MESSAGE = "処理中です。完了までお待ちください"
+
+
+class WatchBusyError(RuntimeError):
+    """スキャン処理中で状態確認＋変更を原子的に実行できない場合に送出する。
+
+    [PR59-中3] 状態確認と変更処理を _scan_lock 内で一連化するため、
+    スキャン中（または処理待ち）の変更要求はこの例外で拒否する。
+    サーバ側（app/web/server.py）は 409 にマッピングする。
+    """
 
 
 def _default_ocr_factory():
@@ -107,6 +120,12 @@ class WatchController:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._is_processing = False
+        # [中-3] 処理待ち（画像コピー後〜 structured 生成完了まで）の状態
+        self._pending_process = False
+        self._pending_image: str | None = None
+        # [PR59-中1] コピー時スナップショット（その画像固有の成果物を特定する基準）
+        self._pending_mtime: int | None = None
+        self._pending_size: int | None = None
         self.last_error: str | None = None
         self.set_preprocess_mode(preprocess_mode)
         if db_path:
@@ -117,10 +136,33 @@ class WatchController:
     # ------------------------------------------------------------------
 
     def set_input_dir(self, path: str | Path) -> Path:
-        """input_dir を更新し、存在しなければ作成する。"""
-        p = Path(path).expanduser()
-        p.mkdir(parents=True, exist_ok=True)
-        self.input_dir = p
+        """input_dir を更新し、存在しなければ作成する。
+
+        [中-4] 認証のない変更系エンドポイントの任意パス操作を防ぐため、
+        絶対パスかつユーザーのホームディレクトリ配下のみ許可する。
+
+        [PR59-中3] 設定更新を _scan_lock 内で行い、スキャンの設定スナップショット
+        （_run_scan が input_dir 等を読み取る瞬間）との競合を防ぐ。
+        スキャン中は WatchBusyError で拒否する。
+
+        Args:
+            path: 指定する input_dir のパス。
+
+        Returns:
+            Path: 更新後の input_dir。
+
+        Raises:
+            ValueError: 相対パスの場合、またはホームディレクトリ配下でない場合。
+            WatchBusyError: スキャン処理中の場合。
+        """
+        p = validate_input_dir(path)
+        if not self._scan_lock.acquire(blocking=False):
+            raise WatchBusyError(BUSY_MESSAGE)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            self.input_dir = p
+        finally:
+            self._scan_lock.release()
         LOG.info("input_dir -> %s", p)
         return p
 
@@ -141,10 +183,23 @@ class WatchController:
         run_migrations(db_path, self.schema_path)
 
     def set_preprocess_mode(self, mode: str) -> None:
-        """前処理モードを検証して設定する。未知の値は ValueError。"""
+        """前処理モードを検証して設定する。未知の値は ValueError。
+
+        [PR59-中3] 設定更新を _scan_lock 内で行い、スキャンの設定スナップショット
+        との競合を防ぐ。スキャン中は WatchBusyError で拒否する。
+
+        Raises:
+            ValueError: 未知のモードを指定した場合。
+            WatchBusyError: スキャン処理中の場合。
+        """
         if mode not in PREPROCESS_MODES:
             raise ValueError(f"unknown preprocess_mode: {mode}")
-        self._preprocess_mode = mode
+        if not self._scan_lock.acquire(blocking=False):
+            raise WatchBusyError(BUSY_MESSAGE)
+        try:
+            self._preprocess_mode = mode
+        finally:
+            self._scan_lock.release()
 
     @property
     def preprocess_mode(self) -> str:
@@ -163,22 +218,34 @@ class WatchController:
     # ------------------------------------------------------------------
 
     def start_watch(self) -> None:
-        """ポーリング監視スレッドを開始する。DB 未選択は ValueError。"""
+        """ポーリング監視スレッドを開始する。DB 未選択は ValueError。
+
+        [中-1] スレッドごとに専用の stop Event を生成する。旧スレッドの
+        停止要求（stop_event）は clear しないため、停止→再開で二重化しない。
+        旧スレッドが生存中（stop_watch が join timeout した直後）は
+        watch_on が True のためここに到達しない（二重起動の防止）。
+        """
         if not self.has_db:
             raise ValueError("データベースを選択してください")
         if self.watch_on:
             return
-        self._stop_event.clear()
+        self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._watch_loop, name="web-watcher", daemon=True)
         self._thread.start()
         LOG.info("watch started (poll_interval=%d)", self.poll_interval)
 
     def stop_watch(self) -> None:
-        """監視スレッドを停止する。スキャン中の場合は timeout で戻る（daemon）。"""
+        """監視スレッドを停止する。
+
+        [中-1] スキャン中で join timeout した場合は、生存中の _thread を
+        保持する（watch_on が True のまま）。停止要求は専用 Event に出して
+        あるため、スキャン完了後にスレッドは自己終了する。
+        """
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=self.poll_interval + 5)
-            self._thread = None
+            if not self._thread.is_alive():
+                self._thread = None
         LOG.info("watch stopped")
 
     @property
@@ -189,10 +256,17 @@ class WatchController:
     def is_processing(self) -> bool:
         return self._is_processing
 
+    @property
+    def pending_process(self) -> bool:
+        """処理待ち（画像コピー後〜 structured 生成完了まで）かどうか。"""
+        return self._pending_process
+
     def _watch_loop(self) -> None:
-        while not self._stop_event.is_set():
+        # [中-1] 開始時点の専用 Event を捕捉する（再開で差し替えられても影響しない）
+        stop_event = self._stop_event
+        while not stop_event.is_set():
             self._run_scan()
-            self._stop_event.wait(self.poll_interval)
+            stop_event.wait(self.poll_interval)
 
     def _run_scan(self) -> None:
         """input_dir をスキャンして処理する。既に処理中ならスキップ。"""
@@ -217,7 +291,64 @@ class WatchController:
             self.last_error = "スキャン中にエラーが発生しました"
         finally:
             self._is_processing = False
+            # [PR59-中3] pending 解除も _scan_lock 内で行い、copy_image との
+            # 状態遷移を直列化する（解除とコピーの競合を防ぐ）
+            self._clear_pending_if_consumed()
             self._scan_lock.release()
+
+    def _reset_pending(self) -> None:
+        """pending 状態とスナップショットをまとめてクリアする。"""
+        self._pending_image = None
+        self._pending_process = False
+        self._pending_mtime = None
+        self._pending_size = None
+
+    def _failed_copy_exists(self) -> bool:
+        """pending 画像の失敗退避（mtime+size 一致）が failed_dir にあるか判定する。
+
+        move_to_failed は shutil.copy2 のため mtime が保存される。同名 failed が既に
+        ある場合は {timestamp}_ プレフィクスが付くため、名前一致ではなく mtime+size で
+        特定する。
+        """
+        if self._pending_mtime is None or self._pending_size is None:
+            return False
+        if not self.failed_dir.is_dir():
+            return False
+        for f in self.failed_dir.iterdir():
+            if not f.is_file():
+                continue
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            if int(st.st_mtime) == self._pending_mtime and st.st_size == self._pending_size:
+                return True
+        return False
+
+    def _clear_pending_if_consumed(self) -> None:
+        """処理待ち画像が処理済み（出力 JSON 生成 or failed 退避）なら pending を解除する。
+
+        [中-3] 読込不能画像（raw が生成されない）でも failed/ への退避があれば解除し、
+        画像指定が永久ロックされないようにする（既存の問題 1 との相互作用対策）。
+
+        [PR59-中1] ファイル名（stem）の glob 一致ではなく、コピー時に記録した
+        mtime+size スナップショットで「その画像」の成果物を特定する。過去の同名出力や
+        過去の failed コピーでは解除されない。
+        """
+        if not self._pending_process or self._pending_image is None:
+            return
+        if self._pending_mtime is None or self._pending_size is None:
+            return  # スナップショット未記録（旧状態）は解除しない
+        stem = Path(self._pending_image).stem
+        mtime = self._pending_mtime
+        consumed = (
+            (self.output_dir / f"{stem}_{mtime}-raw_data.json").exists()
+            or (self.output_dir / f"{stem}_{mtime}-structured_data.json").exists()
+            or self._failed_copy_exists()
+        )
+        if consumed:
+            LOG.info("Pending image processed: %s", self._pending_image)
+            self._reset_pending()
 
     def _get_ocr(self):
         """OCR エンジンの遅延初期化（スレッドセーフ）。テストでは ocr_factory を注入。"""
@@ -244,6 +375,9 @@ class WatchController:
         同名の既存ファイルは上書きせず連番（``name_1.db`` 等）で保存する。
         失敗時は今回作成した一時ファイルのみ削除する（既存 DB は残す）。
 
+        [PR59-中3] 処理中確認と DB 置換を _scan_lock 内で一連化し、
+        スキャン開始との競合（処理中に DB が差し替わる競合）を防ぐ。
+
         Args:
             content: アップロードされたファイル内容。
             filename: 元ファイル名（basename のみ利用する）。
@@ -253,25 +387,33 @@ class WatchController:
 
         Raises:
             ValueError: ファイル名が不正、または SQLite DB として不正な場合。
+            WatchBusyError: スキャン処理中の場合。
         """
         name = Path(filename).name  # basename のみ（パス注入防止）
         if not name or name in {".", ".."}:
             raise ValueError("ファイル名が不正です")
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.data_dir / f".upload-{uuid4().hex}.tmp"
+        if not self._scan_lock.acquire(blocking=False):
+            raise WatchBusyError(BUSY_MESSAGE)
         try:
-            tmp_path.write_bytes(content)
-            self._validate_uploaded_db(tmp_path)
-            self._run_migrations(tmp_path)
-            dest = self._install_db(tmp_path, name)
-        except Exception:
-            LOG.exception("Failed to save uploaded DB %s", name)
-            tmp_path.unlink(missing_ok=True)  # 今回作った一時ファイルのみ削除
-            raise
-        # migration は一時ファイルへ適用済みなので、配置先のパスを設定する
-        self._db_path = dest
-        LOG.info("db_path -> %s", dest)
-        return dest
+            if self._is_processing:
+                raise WatchBusyError(BUSY_MESSAGE)
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.data_dir / f".upload-{uuid4().hex}.tmp"
+            try:
+                tmp_path.write_bytes(content)
+                self._validate_uploaded_db(tmp_path)
+                self._run_migrations(tmp_path)
+                dest = self._install_db(tmp_path, name)
+            except Exception:
+                LOG.exception("Failed to save uploaded DB %s", name)
+                tmp_path.unlink(missing_ok=True)  # 今回作った一時ファイルのみ削除
+                raise
+            # migration は一時ファイルへ適用済みなので、配置先のパスを設定する
+            self._db_path = dest
+            LOG.info("db_path -> %s", dest)
+            return dest
+        finally:
+            self._scan_lock.release()
 
     def _validate_uploaded_db(self, path: Path) -> None:
         """アップロードされた DB ファイルの妥当性を検証する。
@@ -333,15 +475,61 @@ class WatchController:
         raise ValueError(f"保存先が見つかりません: {name}")
 
     def copy_image(self, filename: str, content: bytes) -> Path:
-        """アップロード画像を input_dir へコピーする（案C: コピーのみ・即時処理しない）。"""
+        """アップロード画像を input_dir へコピーする（案C: コピーのみ・即時処理しない）。
+
+        [中-3] コピー直後〜 structured 生成完了までを「処理待ち」状態として保持し、
+        スキャン 1 サイクルで消費されたら解除する。
+
+        [中-5] 同名の既存画像は無確認で上書きせず FileExistsError にする。
+
+        [PR59-中3] 状態確認（処理中/処理待ち）とコピーを _scan_lock 内で一連化し、
+        並行リクエストやスキャン開始との競合を防ぐ。ファイル作成は O_EXCL で
+        原子的に行い、存在確認と作成の間に同名ファイルが割り込めないようにする。
+
+        Args:
+            filename: 元ファイル名（basename のみ利用する）。
+            content: ファイル内容。
+
+        Returns:
+            Path: コピー先のパス。
+
+        Raises:
+            ValueError: 画像ファイルでない場合。
+            WatchBusyError: スキャン処理中または処理待ちの場合。
+            FileExistsError: 同名の既存画像がある場合。
+        """
         name = Path(filename).name
         if Path(name).suffix.lower() not in watcher.IMAGE_EXT:
             raise ValueError("画像ファイルのみ指定できます")
-        self.input_dir.mkdir(parents=True, exist_ok=True)
-        dest = self.input_dir / name
-        dest.write_bytes(content)
-        LOG.info("Copied uploaded image to %s", dest)
-        return dest
+        if not self._scan_lock.acquire(blocking=False):
+            raise WatchBusyError(BUSY_MESSAGE)
+        try:
+            if self._is_processing or self._pending_process:
+                raise WatchBusyError(BUSY_MESSAGE)
+            self.input_dir.mkdir(parents=True, exist_ok=True)
+            dest = self.input_dir / name
+            # [PR59-中3] O_EXCL で作成を予約し、存在確認と作成を原子的に行う
+            try:
+                fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                # [中-5] 同名の既存画像は無確認で上書きしない（連番は再処理による重複登録を招くため不可）
+                raise FileExistsError(f"同名のファイルが既に存在します: {name}") from None
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(content)
+            except Exception:
+                dest.unlink(missing_ok=True)  # 書き込み失敗時は部分ファイルを残さない
+                raise
+            self._pending_image = name
+            self._pending_process = True
+            # [PR59-中1] コピー時スナップショットを記録する（解除判定の基準）
+            st = dest.stat()
+            self._pending_mtime = int(st.st_mtime)
+            self._pending_size = st.st_size
+            LOG.info("Copied uploaded image to %s", dest)
+            return dest
+        finally:
+            self._scan_lock.release()
 
     # ------------------------------------------------------------------
     # 状態
@@ -352,6 +540,7 @@ class WatchController:
         return {
             "watch_on": self.watch_on,
             "is_processing": self.is_processing,
+            "pending": self.pending_process,
             "input_dir": str(self.input_dir),
             "db_path": self.db_path,
             "has_db": self.has_db,

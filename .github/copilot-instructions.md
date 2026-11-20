@@ -96,11 +96,23 @@ the existing database update path instead.
 - Prefer the service/repository boundary already in `app/services/` and `app/db.py` instead of embedding DB logic in the web UI or parser layer.
 - Keep CLI behavior centralized in `app/args.py`; when adding options, follow the existing `--watch`, `--input-json`, `--serve`, and `--db-path` patterns.
 - `docs/schema.sql` is the source of truth for SQLite structure; implement schema evolution through the idempotent migrations in `app/db_migrations.py`.
+- Keep SQLite foreign-key enforcement enabled. Migrations must be idempotent and must preserve the existing database file when tests or Web uploads use SQLite.
+- Tests must not write to the repository's real `data/` directory. `tests/conftest.py` redirects `WatchController.DATA_DIR` and fails if `data/` changes; use temporary paths and the existing fixtures.
 - Template matching is proximity-first and coordinate-aware. The repo uses hybrid matching: exact clinic name match, then text similarity, then layout-based matching (50px proximity / 60% field match).
 - Coordinate bases must stay consistent: templates are marked `topmost` or `date` with `coord_basis`. The admin flow only supports a guarded topmost-to-date transition when a date box is learned; use `TemplateAdminService` and the existing transactional DB operation rather than editing template coordinates or basis directly.
+- When a date-basis template is corrected from the Web UI, convert the corrected coordinates into date basis and keep `coord_basis='date'`. If the receipt or date anchor cannot identify a unique date basis, do not write corrected template coordinates or change the basis.
 - `low_confidence` receipts (topmost OCR confidence below 0.8) skip coordinate normalization and may trigger one preprocessing OCR retry when enabled. User corrections are still recorded, but template learning is skipped for these receipts.
+- OCR and preprocessing are CPU-oriented: `app/args.py` sets `CUDA_VISIBLE_DEVICES=-1` by default. Preserve one-retry behavior for preprocessing and retain both raw JSON variants for comparison.
+- Do not rerun `process_input_json()` after date-anchor normalization. It inserts a receipt and can create duplicates; synchronize persisted OCR coordinates with `update_receipt_ocr_json_by_source()` instead.
+- Web serving is intentionally local and unauthenticated. Do not weaken the loopback-host guard or allow arbitrary host paths outside the home directory.
+- Atomic JSON writes and stable-file checks are part of the pipeline; preserve the existing output naming and file-size stability behavior when changing watcher or writer code.
 - Keep formatting consistent with existing imports and Black style: stdlib -> third-party -> local; line length is 119.
-- CLI option details live in `.hermes/rules/cli.md`; coordinate-basis and date-anchor constraints in `.hermes/rules/coordinate-normalization.md`; preprocessing and output naming in `.hermes/rules/ocr-preprocessing.md`.
+- Detailed changing rules live in `.hermes/rules/`:
+  - `.hermes/rules/cli.md`: CLI and Web operational behavior
+  - `.hermes/rules/coordinate-normalization.md`: coordinate bases, date anchors, and correction synchronization
+  - `.hermes/rules/ocr-preprocessing.md`: retry conditions and output naming
+  - `.hermes/rules/monthly-list-calculation.md`: monthly list filtering and compensation-based contribution calculations
+  - `.hermes/rules/design-decisions.md`: cross-cutting compatibility decisions
 - Prefer targeted validation (`uv run pytest tests/...` or `uv run pytest -k <pattern>`) before broader runs.
 
 ## Project-specific notes

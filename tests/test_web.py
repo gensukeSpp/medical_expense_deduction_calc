@@ -721,11 +721,13 @@ def web_ctl(tmp_path):
 
     def fake_scan(*args, **kwargs):
         # input_dir の画像ごとに structured_data.json を 1 件生成する偽スキャン
+        # [PR59-中1] 出力名は実 mtime を埋め込む（本物の receipt_processor と同じ命名）
         input_dir = Path(args[0])
         output_dir = Path(args[2])
         for p in input_dir.iterdir():
             if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
-                out = output_dir / f"{p.stem}_123-structured_data.json"
+                mtime = int(p.stat().st_mtime)
+                out = output_dir / f"{p.stem}_{mtime}-structured_data.json"
                 if not out.exists():
                     out.write_text(
                         '{"name": "山田 太郎", "clinic": "テスト医院", "amount": 1000, "date": "2026-01-15"}',
@@ -772,9 +774,12 @@ def test_index_shows_control_panel(web_client):
     assert "1枚ずつ" in resp.text
 
 
-def test_config_updates_input_dir_and_mode(web_client, tmp_path):
+def test_config_updates_input_dir_and_mode(web_client, tmp_path, monkeypatch):
     """POST /config で input_dir / preprocess_mode が反映される"""
-    new_dir = tmp_path / "another"
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    new_dir = home / "another"
     resp = web_client.post(
         "/config",
         data={"input_dir": str(new_dir), "preprocess_mode": "clahe"},
@@ -785,6 +790,19 @@ def test_config_updates_input_dir_and_mode(web_client, tmp_path):
     page = web_client.get("/")
     assert str(new_dir) in page.text
     assert 'value="clahe" selected' in page.text
+
+
+def test_config_rejects_path_outside_home(web_client, tmp_path, monkeypatch):
+    """[中-4] ホーム外の input_dir は 400"""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    resp = web_client.post(
+        "/config",
+        data={"input_dir": str(tmp_path / "outside")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 400
 
 
 def test_config_rejects_unknown_mode(web_client):
@@ -845,6 +863,35 @@ def test_config_db_upload_keeps_existing_db(web_client, web_ctl, tmp_path):
     assert (web_ctl.data_dir / "db_1.sqlite3").exists()
 
 
+def test_config_db_upload_409_while_processing(web_client, web_ctl, tmp_path):
+    """[中-2] 処理中の DB 差し替えアップロードは 409"""
+    src = tmp_path / "swap.sqlite3"
+    run_migrations(src, SCHEMA_PATH)
+    web_ctl._is_processing = True
+    try:
+        resp = web_client.post(
+            "/config",
+            files={"db_file": ("swap.db", src.read_bytes(), "application/octet-stream")},
+            follow_redirects=False,
+        )
+    finally:
+        web_ctl._is_processing = False
+    assert resp.status_code == 409
+    assert not (web_ctl.data_dir / "swap.db").exists()
+
+
+def test_db_file_input_disabled_while_processing(web_client, web_ctl):
+    """[中-2] 処理中は db-file-input が disabled になる"""
+    web_ctl._is_processing = True
+    try:
+        page = web_client.get("/")
+        m = re.search(r'<input id="db-file-input"[^>]*>', page.text)
+        assert m is not None, "db-file-input タグが見つからない"
+        assert "disabled" in m.group(0)
+    finally:
+        web_ctl._is_processing = False
+
+
 def test_watch_start_without_db_400(tmp_path):
     """DB 未選択で watch start は 400（受け入れ要件 2）"""
     from app.services.watch_controller import WatchController
@@ -900,6 +947,144 @@ def test_upload_image_copies_to_input_dir(web_client, web_ctl):
     assert dest.read_bytes() == b"fake-jpeg-bytes"
 
 
+def test_images_409_while_pending(web_client, web_ctl):
+    """[中-3] 処理待ち中の画像アップロードは 409（仕様上の拒否）"""
+    web_ctl._pending_process = True
+    try:
+        resp = web_client.post(
+            "/images",
+            files={"image": ("IMG_009.jpg", b"fake-jpeg-bytes", "image/jpeg")},
+            follow_redirects=False,
+        )
+    finally:
+        web_ctl._pending_process = False
+    assert resp.status_code == 409
+
+
+def test_image_input_disabled_while_pending(web_client, web_ctl):
+    """[中-3] 処理待ち中は image-input が disabled になる"""
+    web_ctl._pending_process = True
+    try:
+        page = web_client.get("/")
+        m = re.search(r'<input id="image-input"[^>]*>', page.text)
+        assert m is not None, "image-input タグが見つからない"
+        assert "disabled" in m.group(0)
+    finally:
+        web_ctl._pending_process = False
+
+
+def test_upload_image_409_on_duplicate_name(web_client, web_ctl):
+    """[中-5] 同名画像の再アップロードは 409 で上書きされない"""
+    r1 = web_client.post(
+        "/images",
+        files={"image": ("IMG_004.jpg", b"first-bytes", "image/jpeg")},
+        follow_redirects=False,
+    )
+    assert r1.status_code == 303
+    # 1 回目のコピーで pending になるため、スキャンで消費させてから再アップロードする。
+    # /images は watch を自動開始するため、scan lock の競合を避けて watch を停止してから手動スキャンする。
+    web_ctl.stop_watch()
+    web_ctl._run_scan()
+    assert web_ctl.pending_process is False
+    r2 = web_client.post(
+        "/images",
+        files={"image": ("IMG_004.jpg", b"second-bytes", "image/jpeg")},
+        follow_redirects=False,
+    )
+    assert r2.status_code == 409
+    assert "同名" in r2.json()["detail"]
+    assert (web_ctl.input_dir / "IMG_004.jpg").read_bytes() == b"first-bytes"
+
+
+def test_images_concurrent_upload_same_name(web_client, web_ctl):
+    """[PR59-中3] 同名画像の並行アップロードは 1 件のみ成功（他は 409）"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def post(i):
+        return web_client.post(
+            "/images",
+            files={"image": ("IMG_005.jpg", f"bytes-{i}".encode(), "image/jpeg")},
+            follow_redirects=False,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        responses = list(ex.map(post, range(4)))
+    try:
+        statuses = [r.status_code for r in responses]
+        assert statuses.count(303) == 1
+        assert statuses.count(409) == 3
+        dest = web_ctl.input_dir / "IMG_005.jpg"
+        assert dest.exists()
+        assert dest.read_bytes() in {f"bytes-{i}".encode() for i in range(4)}
+    finally:
+        web_ctl.stop_watch()
+
+
+def test_mutations_rejected_while_scanning(tmp_path, monkeypatch):
+    """[PR59-中3] スキャン中は /images・/config(db_file)・/config(input_dir) が 409"""
+    import threading
+
+    from app.services.watch_controller import WatchController
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_scan(*args, **kwargs):
+        entered.set()
+        release.wait(timeout=10)
+        return 0
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    ctl = WatchController(
+        input_dir=str(tmp_path / "input"),
+        output_dir=str(tmp_path / "output_json"),
+        processed_dir=str(tmp_path / "processed"),
+        failed_dir=str(tmp_path / "failed"),
+        poll_interval=1,
+        scan_fn=slow_scan,
+        ocr_factory=lambda: object(),
+        data_dir=str(tmp_path / "data"),
+    )
+    db = tmp_path / "db.sqlite3"
+    run_migrations(db, SCHEMA_PATH)
+    ctl.set_db_path(db)
+    app = create_app(output_dir=str(tmp_path / "output_json"), controller=ctl)
+    with TestClient(app) as client:
+        client.post("/watch/start", follow_redirects=False)
+        assert entered.wait(timeout=5)
+        # 画像アップロード → 409、ファイルも作られない
+        resp = client.post(
+            "/images",
+            files={"image": ("IMG_001.jpg", b"fake-jpeg-bytes", "image/jpeg")},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 409
+        assert not (ctl.input_dir / "IMG_001.jpg").exists()
+        # DB 差し替え → 409、data/ に保存されない
+        src = tmp_path / "src.sqlite3"
+        run_migrations(src, SCHEMA_PATH)
+        resp = client.post(
+            "/config",
+            files={"db_file": ("swap.db", src.read_bytes(), "application/octet-stream")},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 409
+        assert not (ctl.data_dir / "swap.db").exists()
+        # 設定更新（input_dir）→ 409、変更されない
+        resp = client.post(
+            "/config",
+            data={"input_dir": str(home / "another")},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 409
+        assert ctl.input_dir == tmp_path / "input"
+    release.set()
+    ctl.stop_watch()
+
+
 def test_upload_rejects_non_image(web_client):
     resp = web_client.post(
         "/images",
@@ -923,32 +1108,33 @@ def test_status_endpoint_json(web_client, web_ctl):
 
 
 def test_watch_picks_up_uploaded_image(web_client, web_ctl):
-    """watch ON 中にアップロードした画像がポーリングで処理され一覧にリンクが出る"""
+    """[低-3] リトライなし: アップロード → ポーリング処理 → structured 生成で pending 解除"""
     web_client.post("/watch/start", follow_redirects=False)
-    # スキャン中に POST すると処理中ガード(409)で弾かれるため、アイドル時までリトライする
-    resp = None
-    for _ in range(30):
-        resp = web_client.post(
-            "/images",
-            files={"image": ("IMG_002.jpg", b"fake-jpeg-bytes", "image/jpeg")},
-            follow_redirects=False,
-        )
-        if resp.status_code != 409:
+    # 初回スキャン完了（アイドル）まで待つ — スキャン中の POST は仕様上の 409
+    for _ in range(50):
+        if not web_client.get("/api/status").json()["is_processing"]:
             break
         time.sleep(0.1)
+    # [PR59-中3] ポーリング窗口の scan lock 競合を避けるため一旦停止し、
+    # POST の autostart で watch を再開する（409 リトライループなしの 1 回 POST）
+    web_ctl.stop_watch()
+    resp = web_client.post(
+        "/images",
+        files={"image": ("IMG_002.jpg", b"fake-jpeg-bytes", "image/jpeg")},
+        follow_redirects=False,
+    )
     assert resp.status_code == 303
-    # ポーリングが拾って structured_data.json を生成するまで待つ
-    out_dir = web_ctl.output_dir
+    # ポーリングが拾って structured_data.json を生成するまで待つ（完了で pending 解除）
     deadline = 0
-    structured = None
+    s = None
     while deadline < 100:
-        matches = list(out_dir.glob("*structured_data.json"))
-        if matches:
-            structured = matches[0]
+        s = web_client.get("/api/status").json()
+        if s["structured_count"] > 0 and not s["pending"]:
             break
         time.sleep(0.1)
         deadline += 1
-    assert structured is not None, "structured_data.json が生成されない"
+    assert s is not None and s["structured_count"] > 0, "structured_data.json が生成されない"
+    assert s["pending"] is False
     page = web_client.get("/")
     assert "IMG_002" in page.text  # 一覧にリンクが追加されている
     web_client.post("/watch/stop", follow_redirects=False)

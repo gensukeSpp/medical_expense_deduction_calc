@@ -54,3 +54,27 @@ clinic のテンプレートに `date` 座標が学習済みで、同一 clinic/
 - ファイルサイズを 0.5 秒間隔で 3 回チェックする。
 - サイズが変動中なら処理をスキップする。
 - 書き込み完了を確実に判定する（書き込み中のファイルを読まないため）。
+
+## pending 解除の基準（PR #59 レビュー [中]#1）
+
+`WatchController` の pending（処理待ち）解除は、コピー時に記録した **mtime+size スナップショット**
+を基準に「その画像」の成果物を確認する。
+
+- `copy_image()` は `O_EXCL` 新規作成のため、コピー先の mtime はアップロードごとに一意。
+- 成功判定: 出力ファイル名は元画像の mtime を埋め込む（`receipt_processor.py` の命名規則）ため、
+  `{stem}_{コピー時 mtime}-raw_data.json` / `{stem}_{コピー時 mtime}-structured_data.json` の
+  **完全一致**（stem glob 不使用）で判定する。過去の同名出力が残っていても解除されない。
+- 失敗判定: `move_to_failed` は `shutil.copy2`（mtime 保存）＋同名時 `{timestamp}_` プレフィクス
+  付与のため、failed_dir を走査して mtime+size 一致で特定する。
+- スナップショット未記録（旧状態）は解除しない（安全側）。
+
+## Web UI の状態変更の原子性（PR #59 レビュー [中]#3）
+
+`WatchController` の変更系操作（画像コピー / DB 差し替え / input_dir・preprocess_mode 更新）は
+`_scan_lock` を非ブロッキング取得してから「状態確認＋変更」を一連化する。
+スキャン中（ロック保持中）の変更は `WatchBusyError` で拒否し、サーバは 409 にマッピングする。
+
+- 画像コピーのファイル作成は `O_EXCL` で原子的（存在確認と作成の TOCTOU 防止）。
+- スキャンは `_run_scan` 内で設定（input_dir / preprocess_mode / db_path）をロック保持中に
+  読み取るため、設定更新とのスナップショット競合が起きない。
+- pending の解除もロック内で行い、コピーとの状態遷移を直列化する。

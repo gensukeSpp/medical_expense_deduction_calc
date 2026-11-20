@@ -1,8 +1,17 @@
+import sys
+
+
 def main():
     # 引数解析と初期化
-    from app.args import setup_args, setup_directories
+    from app.args import is_loopback_host, setup_args, setup_directories, validate_input_dir
 
     args = setup_args()
+    if args.serve:
+        try:
+            args.input_dir = str(validate_input_dir(args.input_dir))
+        except ValueError as exc:
+            raise SystemExit(f"エラー: --input-dir: {exc}") from exc
+
     input_dir, output_dir, processed_dir, failed_dir = setup_directories(args)
 
     # データベースのテーブルを初期化するためのマイグレーション処理
@@ -15,6 +24,15 @@ def main():
 
     # Web UI サーバー起動 (OCR は WatchController が遅延初期化するためここでは生成しない)
     if args.serve:
+        if not is_loopback_host(args.host):
+            # [中-4] 認証のない変更系エンドポイントがあるため、非 loopback 起動は拒否する
+            print(
+                f"エラー: ホスト {args.host} はループバックではありません。\n"
+                "このアプリには認証がなく、任意パス操作・DB 差し替え・画像コピーが可能です。\n"
+                "127.0.0.1 (localhost) でのみ起動してください。",
+                file=sys.stderr,
+            )
+            return
         import uvicorn
         from app.web.server import create_app
 

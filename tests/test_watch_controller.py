@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -10,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from app.db_migrations import run_migrations
-from app.services.watch_controller import PREPROCESS_MODES, WatchController
+from app.services.watch_controller import PREPROCESS_MODES, WatchBusyError, WatchController
 
 SCHEMA_PATH = "docs/schema.sql"
 # リポジトリ直下の data/（実データ置き場）。テストはここへ書き込んではいけない。
@@ -20,14 +22,28 @@ REPO_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 # --- 設定: input_dir ---
 
 
-def test_set_input_dir_creates_directory(tmp_path):
+def test_set_input_dir_creates_directory(tmp_path, monkeypatch):
     """存在しない input_dir を指定すると mkdir され、状態が更新される"""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     ctl = WatchController(output_dir=str(tmp_path / "output"))
-    target = tmp_path / "nested" / "receipts"
+    target = home / "nested" / "receipts"
     result = ctl.set_input_dir(str(target))
     assert target.is_dir()
     assert ctl.input_dir == target
     assert result == target
+
+
+def test_set_input_dir_rejects_outside_home(tmp_path, monkeypatch):
+    """[中-4] 許可ルート（ホーム）外の input_dir は ValueError"""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    ctl = WatchController(output_dir=str(tmp_path / "output"))
+    with pytest.raises(ValueError, match="ホーム"):
+        ctl.set_input_dir(str(tmp_path / "outside"))
+    assert ctl.input_dir != tmp_path / "outside"
 
 
 def test_default_input_dir_is_downloads_receipts():
@@ -102,6 +118,40 @@ def test_start_watch_requires_db(tmp_path):
     with pytest.raises(ValueError, match="データベース"):
         ctl.start_watch()
     assert ctl.watch_on is False
+
+
+def test_stop_restart_no_duplicate_thread(tmp_path):
+    """[中-1] 停止→再開で監視スレッドが二重化しない"""
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_scan(*args, **kwargs):
+        entered.set()
+        release.wait(timeout=10)
+
+    ctl = _make_ctl(tmp_path, scan_fn=slow_scan, poll_interval=0.1)
+    ctl.start_watch()
+    old = ctl._thread
+    assert old is not None
+    assert entered.wait(timeout=5)
+    # スキャン中に停止 → join timeout で戻るが、生存中の _thread は保持される
+    ctl.stop_watch()
+    assert ctl.watch_on is True
+    # 生存中に再開しても新スレッドは作られない（二重化防止）
+    ctl.start_watch()
+    assert ctl._thread is old
+    # スキャン完了 → 専用 stop Event により旧スレッドが自己終了する
+    release.set()
+    old.join(timeout=5)
+    assert not old.is_alive()
+    assert ctl.watch_on is False
+    # 再開できる（新スレッド 1 本だけ）
+    ctl.start_watch()
+    assert ctl._thread is not old
+    assert ctl.watch_on is True
+    alive = [t for t in threading.enumerate() if t.name == "web-watcher" and t.is_alive()]
+    assert len(alive) == 1
+    ctl.stop_watch()
 
 
 def test_start_stop_watch_toggles(tmp_path):
@@ -181,6 +231,108 @@ def test_watch_loop_calls_scan_repeatedly(tmp_path):
         deadline += 1
     ctl.stop_watch()
     assert len(calls) >= 2
+
+
+# --- [中-3] 処理待ち状態 ---
+
+
+def test_copy_image_sets_pending(tmp_path):
+    """[中-3] 画像コピー直後は処理待ち（pending）状態になる"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    assert ctl.pending_process is True
+    assert ctl.get_status()["pending"] is True
+
+
+def test_scan_clears_pending_when_structured_generated(tmp_path):
+    """[中-3] structured_data 生成後は pending が解除される"""
+
+    def fake_scan(*args, **kwargs):
+        input_dir = Path(args[0])
+        output_dir = Path(args[2])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for p in input_dir.iterdir():
+            if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                mtime = int(p.stat().st_mtime)
+                out = output_dir / f"{p.stem}_{mtime}-structured_data.json"
+                if not out.exists():
+                    out.write_text('{"name": "山田 太郎"}', encoding="utf-8")
+        return 1
+
+    ctl = _make_ctl(tmp_path, scan_fn=fake_scan)
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    assert ctl.pending_process is True
+    mtime = ctl._pending_mtime
+    assert mtime is not None
+    ctl._run_scan()
+    assert ctl.pending_process is False
+    assert (ctl.output_dir / f"IMG_001_{mtime}-structured_data.json").exists()
+
+
+def test_pending_cleared_when_image_moved_to_failed(tmp_path):
+    """[中-3] 処理待ち画像が failed_dir へ退避済みなら pending が解除される"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    ctl.failed_dir.mkdir(parents=True, exist_ok=True)
+    # move_to_failed は copy2 のため mtime が保存される前提で退避を再現する
+    shutil.copy2(ctl.input_dir / "IMG_001.jpg", ctl.failed_dir / "IMG_001.jpg")
+    ctl._run_scan()
+    assert ctl.pending_process is False
+
+
+def test_pending_stays_until_consumed(tmp_path):
+    """[中-3] スキャンが画像を処理しなかった場合は pending が維持される"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    ctl._run_scan()
+    assert ctl.pending_process is True
+
+
+def test_pending_not_cleared_by_old_output(tmp_path):
+    """[PR59-中1] 過去の同名出力が残っていても、新しい画像が未処理なら pending は解除されない"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    # 過去のアップロードで生成された出力（旧 mtime）を事前作成
+    ctl.output_dir.mkdir(parents=True, exist_ok=True)
+    (ctl.output_dir / "IMG_001_9999999999-structured_data.json").write_text('{"name": "過去"}', encoding="utf-8")
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    assert ctl.pending_process is True
+    ctl._run_scan()  # スキャンは何も処理しない
+    assert ctl.pending_process is True  # 過去出力では解除されない
+
+
+def test_pending_not_cleared_by_old_failed_copy(tmp_path):
+    """[PR59-中1] 過去の failed コピー（mtime 不一致）では pending は解除されない"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    ctl.failed_dir.mkdir(parents=True, exist_ok=True)
+    # 過去の失敗退避（mtime が古い）を事前作成
+    old = ctl.failed_dir / "IMG_001.jpg"
+    old.write_bytes(b"old-failed-bytes")
+    os.utime(old, (1_000_000_000, 1_000_000_000))  # 2001 年相当の旧 mtime
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    ctl._run_scan()
+    assert ctl.pending_process is True
+
+
+def test_pending_cleared_by_new_output_with_matching_mtime(tmp_path):
+    """[PR59-中1] コピー時 mtime と一致する出力が生成されたら pending が解除される"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    mtime = ctl._pending_mtime
+    assert mtime is not None
+    ctl.output_dir.mkdir(parents=True, exist_ok=True)
+    (ctl.output_dir / f"IMG_001_{mtime}-structured_data.json").write_text('{"name": "山田 太郎"}', encoding="utf-8")
+    ctl._run_scan()
+    assert ctl.pending_process is False
+
+
+def test_pending_cleared_by_failed_copy_with_matching_mtime(tmp_path):
+    """[PR59-中1] mtime+size 一致の failed コピーで pending が解除される"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+    ctl.failed_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ctl.input_dir / "IMG_001.jpg", ctl.failed_dir / "IMG_001.jpg")
+    ctl._run_scan()
+    assert ctl.pending_process is False
 
 
 # --- DB アップロード保存 ---
@@ -346,6 +498,130 @@ def test_copy_image_rejects_non_image(tmp_path):
         ctl.copy_image("notes.txt", b"hello")
 
 
+def test_copy_image_rejects_existing_same_name(tmp_path):
+    """[中-5] 同名の既存画像は上書きされず FileExistsError になる"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    ctl.copy_image("IMG_001.jpg", b"first-bytes")
+    # [PR59-中3] pending ガードが copy_image 内へ移ったため、
+    # スキャンによる消費を模擬して pending を解除してから再アップロードする
+    ctl._reset_pending()
+    with pytest.raises(FileExistsError):
+        ctl.copy_image("IMG_001.jpg", b"second-bytes")
+    # 原画像は失われない
+    assert (ctl.input_dir / "IMG_001.jpg").read_bytes() == b"first-bytes"
+
+
+# --- [PR59-中3] 状態確認＋変更の原子性（scan lock による一連化） ---
+
+
+def _start_slow_scan(tmp_path, entered: threading.Event, release: threading.Event) -> WatchController:
+    """slow_scan を注入したコントローラを作り watch を開始し、スキャン開始を待つ。"""
+
+    def slow_scan(*args, **kwargs):
+        entered.set()
+        release.wait(timeout=10)
+
+    ctl = _make_ctl(tmp_path, scan_fn=slow_scan, poll_interval=0.1)
+    ctl.start_watch()
+    assert entered.wait(timeout=5), "scan が開始されない"
+    return ctl
+
+
+def test_copy_image_rejected_while_scanning(tmp_path):
+    """[PR59-中3] スキャン中のコピーは WatchBusyError で拒否されファイルも作られない"""
+    entered = threading.Event()
+    release = threading.Event()
+    ctl = _start_slow_scan(tmp_path, entered, release)
+    try:
+        with pytest.raises(WatchBusyError):
+            ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+        assert not (ctl.input_dir / "IMG_001.jpg").exists()
+        assert ctl.pending_process is False
+    finally:
+        release.set()
+        ctl.stop_watch()
+
+
+def test_save_db_upload_rejected_while_scanning(tmp_path):
+    """[PR59-中3] スキャン中の DB 差し替えは拒否され db_path は変わらない"""
+    entered = threading.Event()
+    release = threading.Event()
+    ctl = _start_slow_scan(tmp_path, entered, release)
+    src = tmp_path / "src.sqlite3"
+    run_migrations(src, SCHEMA_PATH)
+    try:
+        with pytest.raises(WatchBusyError):
+            ctl.save_db_upload(src.read_bytes(), "swap.db")
+        assert not (ctl.data_dir / "swap.db").exists()
+        assert ctl.db_path == str(tmp_path / "db.sqlite3")
+    finally:
+        release.set()
+        ctl.stop_watch()
+
+
+def test_set_input_dir_rejected_while_scanning(tmp_path, monkeypatch):
+    """[PR59-中3] スキャン中の input_dir 変更は拒否される（設定更新の原子性）"""
+    entered = threading.Event()
+    release = threading.Event()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    ctl = _start_slow_scan(tmp_path, entered, release)
+    try:
+        with pytest.raises(WatchBusyError):
+            ctl.set_input_dir(home / "another")
+        assert ctl.input_dir == tmp_path / "input"
+    finally:
+        release.set()
+        ctl.stop_watch()
+
+
+def test_set_preprocess_mode_rejected_while_scanning(tmp_path):
+    """[PR59-中3] スキャン中の preprocess_mode 変更は拒否される"""
+    entered = threading.Event()
+    release = threading.Event()
+    ctl = _start_slow_scan(tmp_path, entered, release)
+    try:
+        with pytest.raises(WatchBusyError):
+            ctl.set_preprocess_mode("clahe")
+        assert ctl.preprocess_mode == "none"
+    finally:
+        release.set()
+        ctl.stop_watch()
+
+
+def test_copy_image_concurrent_same_name_one_succeeds(tmp_path):
+    """[PR59-中3] 同名画像の並行コピーは 1 件のみ成功（scan lock + O_EXCL）"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    results: list[tuple[str, int]] = []
+    results_lock = threading.Lock()
+
+    def worker(i: int) -> None:
+        try:
+            ctl.copy_image("IMG_001.jpg", f"bytes-{i}".encode())
+        except WatchBusyError:
+            outcome = "busy"
+        else:
+            outcome = "ok"
+        with results_lock:
+            results.append((outcome, i))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    ok = [r for r in results if r[0] == "ok"]
+    busy = [r for r in results if r[0] == "busy"]
+    assert len(ok) == 1
+    assert len(busy) == 7
+    winner = ok[0][1]
+    dest = ctl.input_dir / "IMG_001.jpg"
+    assert dest.read_bytes() == f"bytes-{winner}".encode()
+    assert ctl.pending_process is True
+
+
 # --- 状態 ---
 
 
@@ -355,6 +631,7 @@ def test_get_status_shape(tmp_path):
     assert set(s) == {
         "watch_on",
         "is_processing",
+        "pending",
         "input_dir",
         "db_path",
         "has_db",
