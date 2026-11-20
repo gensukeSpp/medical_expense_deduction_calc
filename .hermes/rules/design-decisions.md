@@ -55,6 +55,15 @@ clinic のテンプレートに `date` 座標が学習済みで、同一 clinic/
 - サイズが変動中なら処理をスキップする。
 - 書き込み完了を確実に判定する（書き込み中のファイルを読まないため）。
 
+## 読込不能画像の再処理停止 (Issue #60)
+
+`process_image()` が空 `[]` を返し raw JSON 未生成（resize 失敗、`cv2.imread` が None）の場合は
+`_sync_process` が失敗扱いで `move_to_failed` を呼び `False` を返す。`move_to_failed` は
+`shutil.move` で input から failed/ へ移動する（copy ではない）。有効画像で OCR 結果 0 行の
+場合は raw JSON が書かれるため失敗扱いされない。読込不能画像は `input_dir` から外れるため
+mtime ガードに頼らず再処理が決定的に止まる。失敗画像は自動復旧せず、ユーザーが目視確認・
+別名再投入する運用。
+
 ## pending 解除の基準（PR #59 レビュー [中]#1）
 
 `WatchController` の pending（処理待ち）解除は、コピー時に記録した **mtime+size スナップショット**
@@ -64,8 +73,8 @@ clinic のテンプレートに `date` 座標が学習済みで、同一 clinic/
 - 成功判定: 出力ファイル名は元画像の mtime を埋め込む（`receipt_processor.py` の命名規則）ため、
   `{stem}_{コピー時 mtime}-raw_data.json` / `{stem}_{コピー時 mtime}-structured_data.json` の
   **完全一致**（stem glob 不使用）で判定する。過去の同名出力が残っていても解除されない。
-- 失敗判定: `move_to_failed` は `shutil.copy2`（mtime 保存）＋同名時 `{timestamp}_` プレフィクス
-  付与のため、failed_dir を走査して mtime+size 一致で特定する。
+- 失敗判定: `move_to_failed` は `shutil.move`（同一 FS では rename 相当で mtime 保存）＋同名時
+  `{timestamp}_` プレフィクス付与のため、failed_dir を走査して mtime+size 一致で特定する。
 - スナップショット未記録（旧状態）は解除しない（安全側）。
 
 ## Web UI の状態変更の原子性（PR #59 レビュー [中]#3）
