@@ -78,13 +78,13 @@ class TestIsFileStable:
 
 
 class TestMoveToFailed:
-    def test_copies_file_to_failed_dir(self, repo: FileRepository, tmp_path: Path):
+    def test_moves_file_to_failed_dir(self, repo: FileRepository, tmp_path: Path):
         p = tmp_path / "fail.jpg"
         p.write_text("data")
         repo.move_to_failed(p)
         assert (repo.failed_dir / "fail.jpg").exists()
-        # original should still exist (copy2)
-        assert p.exists()
+        # original should be removed from input (move, not copy)
+        assert not p.exists()
 
     def test_handles_duplicate_name(self, repo: FileRepository, tmp_path: Path):
         p = tmp_path / "fail.jpg"

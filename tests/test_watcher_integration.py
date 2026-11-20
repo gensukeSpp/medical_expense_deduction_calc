@@ -217,3 +217,44 @@ def test_run_watchdog_fallback_forwards_preprocess_force(tmp_path):
         run_watchdog(*args, preprocess_force=True)
 
     assert run.call_args.kwargs["preprocess_force"] is True
+
+
+def test_unreadable_image_moved_to_failed_and_not_reprocessed(tmp_path):
+    """Issue #60: 読込不能画像は 1 サイクルで failed/ へ移動し、次のサイクルで再処理されない"""
+    input_dir = tmp_path / "input-u"
+    output_dir = tmp_path / "output-u"
+    processed_dir = tmp_path / "processed-u"
+    failed_dir = tmp_path / "failed-u"
+
+    input_dir.mkdir()
+    # 読込不能画像: cv2.imread が読めないバイナリを .jpg として配置（resize 失敗 → []）
+    bad = input_dir / "broken.jpg"
+    bad.write_bytes(b"\x00\x01\x02 not a real image")
+
+    ocr = FakeOCR()
+
+    first = scan_and_process(
+        input_dir=input_dir,
+        ocr=ocr,
+        output_dir=output_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        retries=0,
+    )
+    assert first == 0  # 失敗扱い（成功数に数えない）
+    assert not (input_dir / "broken.jpg").exists()  # input から取り除かれた
+    assert (failed_dir / "broken.jpg").exists()  # failed/ へ退避された
+    assert len(list(output_dir.glob("*-raw_data.json"))) == 0
+
+    # 次のサイクル: 元画像が input にないため再処理されない
+    second = scan_and_process(
+        input_dir=input_dir,
+        ocr=ocr,
+        output_dir=output_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        retries=0,
+    )
+    assert second == 0
+    assert not (input_dir / "broken.jpg").exists()
+    assert (failed_dir / "broken.jpg").exists()

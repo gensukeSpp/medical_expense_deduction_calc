@@ -261,6 +261,8 @@ refactor #<issue>: <description>
   且つ date 学習済みなら template coords で近傍抽出を強制する（`apply_date_basis_force()`、両経路統合、
   `--force` 検証ツール対応。Issue #50）。詳細は `coordinate-normalization.md`。
 - **ファイル安定性チェック**: `is_file_stable()` が 0.5 秒間隔 × 3 回のサイズ比較で書込み完了を判定。
+- **読込不能画像は 1 サイクルで failed/ へ移動し再処理を止める**（`_sync_process` の raw 未生成ガード）。
+  詳細は `design-decisions.md`。
 
 詳細は以下を参照:
 - [.hermes/rules/design-decisions.md](./.hermes/rules/design-decisions.md) — 設計判断の要約と相互リンク

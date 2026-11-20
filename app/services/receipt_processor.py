@@ -154,6 +154,18 @@ class ReceiptProcessor:
                     target_short_side=self.target_short_side,
                 )
 
+                # Issue #60: 読込不能画像（OCR が空 [] を返し raw JSON 未生成）は失敗として
+                # failed/ へ退避し、次のサイクルで再処理されないようにする。
+                # ※ 有効な画像で OCR 結果が 0 行の場合は process_image が raw JSON を書くため、
+                #    ここは「raw 未生成」のみを読込不能として扱う。
+                if not structured and not output_json_path.exists():
+                    LOG.warning(
+                        "Image produced no OCR result and no raw JSON (unreadable); moving to failed: %s",
+                        image_path,
+                    )
+                    self.file_repository.move_to_failed(image_path)
+                    return False
+
                 resized_path = output_dir / f"resized_gray_{image_path.name}"
 
                 LOG.info("Processed %s -> %s (%d items)", image_path, output_json_path, len(structured))
