@@ -1,7 +1,7 @@
 ---
 title: コマンド主体から Web UI へ (Command-to-WebUI)
 created: 2026-11-16
-updated: 2026-11-19
+updated: 2026-11-20
 issue: 56
 ---
 
@@ -20,7 +20,7 @@ CLI コマンド主体の操作を Web UI（`--serve` のみ）で完結させ�
 ## エンドポイント
 | ルート | メソッド | 動作 | エラー |
 |--------|---------|------|--------|
-| `/config` | POST | input_dir / preprocess_mode / db_file 設定 | 400 (mode, DB 不正, パス不正), 409 (処理中 db_file) |
+| `/config` | POST | input_dir / preprocess_mode / db_file 設定 | 400 (mode, DB 不正, パス不正), 409 (スキャン処理中の設定変更・db_file) |
 | `/watch/start` | POST | 監視開始 | 400 (DB 未選択) |
 | `/watch/stop` | POST | 監視停止 | - |
 | `/images` | POST | 画像を input_dir へコピー（＋ watch 自動開始） | 400 (DB 未選択・非画像), 409 (処理中・処理待ち・同名) |
@@ -48,6 +48,7 @@ watch_on / is_processing / pending / input_dir / db_path / preprocess_mode / pol
 | watch スレッド | スレッドごとに専用 stop Event | 停止→再開で旧スレッドの停止要求が消えて二重化するのを防止 |
 | DB 差し替え | 処理中は 409 | 書き込み先 DB が途中で変わる競合の防止 |
 | 同名画像 | 409（上書きしない・連番保存もしない） | 上書きによる画像損失と、連番による再処理・重複登録の防止 |
+| 状態確認＋変更の原子性 | _scan_lock 内で一連化（画像コピー / DB 置換 / 設定更新）＋画像作成は O_EXCL | 並行リクエストやスキャン開始との競合（PR #59 レビュー [中]#3）の防止 |
 
 ## 受け入れ要件との対応
 1. Web ページから watch 動作 → POST /watch/start + /api/status で確認
@@ -58,3 +59,4 @@ watch_on / is_processing / pending / input_dir / db_path / preprocess_mode / pol
 6. 同名画像は上書きせず 409（[中-5]）→ copy_image の FileExistsError
 7. 非 loopback host での起動は拒否（[中-4]）→ app.args.is_loopback_host() + main.py の serve 分岐
 8. ホーム配下以外の input_dir は 400（[中-4]）→ WatchController.set_input_dir() のガード
+9. 状態確認＋変更は原子的（PR #59 レビュー [中]#3）→ _scan_lock 内で一連化＋画像作成は O_EXCL

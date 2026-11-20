@@ -14,7 +14,7 @@ from app.services.template_admin_service import (
     TemplateBasisConflictError,
 )
 from app.services import watch_controller
-from app.services.watch_controller import DEFAULT_INPUT_DIR, WatchController
+from app.services.watch_controller import DEFAULT_INPUT_DIR, WatchBusyError, WatchController
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
@@ -285,18 +285,24 @@ def create_app(
                 controller.set_input_dir(str(input_dir))
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
+            except WatchBusyError as e:
+                # [PR59-中3] 設定更新は scan lock 内で原子的（スキャン中は 409）
+                raise HTTPException(status_code=409, detail=str(e))
         mode = str(form.get("preprocess_mode") or controller.preprocess_mode)
         try:
             controller.set_preprocess_mode(mode)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except WatchBusyError as e:
+            raise HTTPException(status_code=409, detail=str(e))
         db_file = form.get("db_file")
         if db_file is not None and getattr(db_file, "filename", ""):
             # [中-2] 処理中の DB 差し替えは拒否（書き込み先 DB が途中で変わるため）
-            if controller.is_processing:
-                raise HTTPException(status_code=409, detail="処理中です。完了までお待ちください")
+            # [PR59-中3] 処理中確認＋DB 置換は save_db_upload 内で scan lock を使って一連化
             try:
                 controller.save_db_upload(await db_file.read(), db_file.filename)
+            except WatchBusyError as e:
+                raise HTTPException(status_code=409, detail=str(e))
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             except Exception:
@@ -323,18 +329,19 @@ def create_app(
         """画像を指定フォルダへコピーする（案C: コピーのみ。処理は watch のポーリングが行う）"""
         if not controller.has_db:
             raise HTTPException(status_code=400, detail="データベースを選択してください")
-        # [中-3] 処理中または処理待ち（コピー後〜 structured 生成完了）は 409
-        if controller.is_processing or controller.pending_process:
-            raise HTTPException(status_code=409, detail="処理中です。完了までお待ちください")
         form = await request.form()
         image = form.get("image")
         if image is None or not getattr(image, "filename", ""):
             raise HTTPException(status_code=400, detail="画像ファイルを選択してください")
         content = await image.read()
+        # [PR59-中3] 処理中/処理待ちの確認とコピーは copy_image 内で scan lock を使って一連化
         try:
             controller.copy_image(image.filename, content)
         except FileExistsError as e:
             # [中-5] 同名の既存画像は上書きせず 409
+            raise HTTPException(status_code=409, detail=str(e))
+        except WatchBusyError as e:
+            # [中-3] 処理中または処理待ち（コピー後〜 structured 生成完了）は 409
             raise HTTPException(status_code=409, detail=str(e))
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))

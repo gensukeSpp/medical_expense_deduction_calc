@@ -3,9 +3,15 @@ import sys
 
 def main():
     # 引数解析と初期化
-    from app.args import is_loopback_host, setup_args, setup_directories
+    from app.args import is_loopback_host, setup_args, setup_directories, validate_input_dir
 
     args = setup_args()
+    if args.serve:
+        try:
+            args.input_dir = str(validate_input_dir(args.input_dir))
+        except ValueError as exc:
+            raise SystemExit(f"エラー: --input-dir: {exc}") from exc
+
     input_dir, output_dir, processed_dir, failed_dir = setup_directories(args)
 
     # データベースのテーブルを初期化するためのマイグレーション処理

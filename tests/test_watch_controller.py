@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from app.db_migrations import run_migrations
-from app.services.watch_controller import PREPROCESS_MODES, WatchController
+from app.services.watch_controller import PREPROCESS_MODES, WatchBusyError, WatchController
 
 SCHEMA_PATH = "docs/schema.sql"
 # リポジトリ直下の data/（実データ置き場）。テストはここへ書き込んではいけない。
@@ -449,10 +449,125 @@ def test_copy_image_rejects_existing_same_name(tmp_path):
     """[中-5] 同名の既存画像は上書きされず FileExistsError になる"""
     ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
     ctl.copy_image("IMG_001.jpg", b"first-bytes")
+    # [PR59-中3] pending ガードが copy_image 内へ移ったため、
+    # スキャンによる消費を模擬して pending を解除してから再アップロードする
+    ctl._pending_process = False
+    ctl._pending_image = None
     with pytest.raises(FileExistsError):
         ctl.copy_image("IMG_001.jpg", b"second-bytes")
     # 原画像は失われない
     assert (ctl.input_dir / "IMG_001.jpg").read_bytes() == b"first-bytes"
+
+
+# --- [PR59-中3] 状態確認＋変更の原子性（scan lock による一連化） ---
+
+
+def _start_slow_scan(tmp_path, entered: threading.Event, release: threading.Event) -> WatchController:
+    """slow_scan を注入したコントローラを作り watch を開始し、スキャン開始を待つ。"""
+
+    def slow_scan(*args, **kwargs):
+        entered.set()
+        release.wait(timeout=10)
+
+    ctl = _make_ctl(tmp_path, scan_fn=slow_scan, poll_interval=0.1)
+    ctl.start_watch()
+    assert entered.wait(timeout=5), "scan が開始されない"
+    return ctl
+
+
+def test_copy_image_rejected_while_scanning(tmp_path):
+    """[PR59-中3] スキャン中のコピーは WatchBusyError で拒否されファイルも作られない"""
+    entered = threading.Event()
+    release = threading.Event()
+    ctl = _start_slow_scan(tmp_path, entered, release)
+    try:
+        with pytest.raises(WatchBusyError):
+            ctl.copy_image("IMG_001.jpg", b"fake-jpeg-bytes")
+        assert not (ctl.input_dir / "IMG_001.jpg").exists()
+        assert ctl.pending_process is False
+    finally:
+        release.set()
+        ctl.stop_watch()
+
+
+def test_save_db_upload_rejected_while_scanning(tmp_path):
+    """[PR59-中3] スキャン中の DB 差し替えは拒否され db_path は変わらない"""
+    entered = threading.Event()
+    release = threading.Event()
+    ctl = _start_slow_scan(tmp_path, entered, release)
+    src = tmp_path / "src.sqlite3"
+    run_migrations(src, SCHEMA_PATH)
+    try:
+        with pytest.raises(WatchBusyError):
+            ctl.save_db_upload(src.read_bytes(), "swap.db")
+        assert not (ctl.data_dir / "swap.db").exists()
+        assert ctl.db_path == str(tmp_path / "db.sqlite3")
+    finally:
+        release.set()
+        ctl.stop_watch()
+
+
+def test_set_input_dir_rejected_while_scanning(tmp_path, monkeypatch):
+    """[PR59-中3] スキャン中の input_dir 変更は拒否される（設定更新の原子性）"""
+    entered = threading.Event()
+    release = threading.Event()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    ctl = _start_slow_scan(tmp_path, entered, release)
+    try:
+        with pytest.raises(WatchBusyError):
+            ctl.set_input_dir(home / "another")
+        assert ctl.input_dir == tmp_path / "input"
+    finally:
+        release.set()
+        ctl.stop_watch()
+
+
+def test_set_preprocess_mode_rejected_while_scanning(tmp_path):
+    """[PR59-中3] スキャン中の preprocess_mode 変更は拒否される"""
+    entered = threading.Event()
+    release = threading.Event()
+    ctl = _start_slow_scan(tmp_path, entered, release)
+    try:
+        with pytest.raises(WatchBusyError):
+            ctl.set_preprocess_mode("clahe")
+        assert ctl.preprocess_mode == "none"
+    finally:
+        release.set()
+        ctl.stop_watch()
+
+
+def test_copy_image_concurrent_same_name_one_succeeds(tmp_path):
+    """[PR59-中3] 同名画像の並行コピーは 1 件のみ成功（scan lock + O_EXCL）"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    results: list[tuple[str, int]] = []
+    results_lock = threading.Lock()
+
+    def worker(i: int) -> None:
+        try:
+            ctl.copy_image("IMG_001.jpg", f"bytes-{i}".encode())
+        except WatchBusyError:
+            outcome = "busy"
+        else:
+            outcome = "ok"
+        with results_lock:
+            results.append((outcome, i))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    ok = [r for r in results if r[0] == "ok"]
+    busy = [r for r in results if r[0] == "busy"]
+    assert len(ok) == 1
+    assert len(busy) == 7
+    winner = ok[0][1]
+    dest = ctl.input_dir / "IMG_001.jpg"
+    assert dest.read_bytes() == f"bytes-{winner}".encode()
+    assert ctl.pending_process is True
 
 
 # --- 状態 ---

@@ -994,6 +994,95 @@ def test_upload_image_409_on_duplicate_name(web_client, web_ctl):
     assert (web_ctl.input_dir / "IMG_004.jpg").read_bytes() == b"first-bytes"
 
 
+def test_images_concurrent_upload_same_name(web_client, web_ctl):
+    """[PR59-中3] 同名画像の並行アップロードは 1 件のみ成功（他は 409）"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def post(i):
+        return web_client.post(
+            "/images",
+            files={"image": ("IMG_005.jpg", f"bytes-{i}".encode(), "image/jpeg")},
+            follow_redirects=False,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        responses = list(ex.map(post, range(4)))
+    try:
+        statuses = [r.status_code for r in responses]
+        assert statuses.count(303) == 1
+        assert statuses.count(409) == 3
+        dest = web_ctl.input_dir / "IMG_005.jpg"
+        assert dest.exists()
+        assert dest.read_bytes() in {f"bytes-{i}".encode() for i in range(4)}
+    finally:
+        web_ctl.stop_watch()
+
+
+def test_mutations_rejected_while_scanning(tmp_path, monkeypatch):
+    """[PR59-中3] スキャン中は /images・/config(db_file)・/config(input_dir) が 409"""
+    import threading
+
+    from app.services.watch_controller import WatchController
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_scan(*args, **kwargs):
+        entered.set()
+        release.wait(timeout=10)
+        return 0
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    ctl = WatchController(
+        input_dir=str(tmp_path / "input"),
+        output_dir=str(tmp_path / "output_json"),
+        processed_dir=str(tmp_path / "processed"),
+        failed_dir=str(tmp_path / "failed"),
+        poll_interval=1,
+        scan_fn=slow_scan,
+        ocr_factory=lambda: object(),
+        data_dir=str(tmp_path / "data"),
+    )
+    db = tmp_path / "db.sqlite3"
+    run_migrations(db, SCHEMA_PATH)
+    ctl.set_db_path(db)
+    app = create_app(output_dir=str(tmp_path / "output_json"), controller=ctl)
+    with TestClient(app) as client:
+        client.post("/watch/start", follow_redirects=False)
+        assert entered.wait(timeout=5)
+        # 画像アップロード → 409、ファイルも作られない
+        resp = client.post(
+            "/images",
+            files={"image": ("IMG_001.jpg", b"fake-jpeg-bytes", "image/jpeg")},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 409
+        assert not (ctl.input_dir / "IMG_001.jpg").exists()
+        # DB 差し替え → 409、data/ に保存されない
+        src = tmp_path / "src.sqlite3"
+        run_migrations(src, SCHEMA_PATH)
+        resp = client.post(
+            "/config",
+            files={"db_file": ("swap.db", src.read_bytes(), "application/octet-stream")},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 409
+        assert not (ctl.data_dir / "swap.db").exists()
+        # 設定更新（input_dir）→ 409、変更されない
+        resp = client.post(
+            "/config",
+            data={"input_dir": str(home / "another")},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 409
+        assert ctl.input_dir == tmp_path / "input"
+    release.set()
+    ctl.stop_watch()
+
+
 def test_upload_rejects_non_image(web_client):
     resp = web_client.post(
         "/images",
@@ -1024,7 +1113,9 @@ def test_watch_picks_up_uploaded_image(web_client, web_ctl):
         if not web_client.get("/api/status").json()["is_processing"]:
             break
         time.sleep(0.1)
-    # 409 リトライループなしの 1 回 POST
+    # [PR59-中3] ポーリング窗口の scan lock 競合を避けるため一旦停止し、
+    # POST の autostart で watch を再開する（409 リトライループなしの 1 回 POST）
+    web_ctl.stop_watch()
     resp = web_client.post(
         "/images",
         files={"image": ("IMG_002.jpg", b"fake-jpeg-bytes", "image/jpeg")},
