@@ -116,7 +116,7 @@ class TestSyncProcess:
         "app.coord_normalizer.normalize_coordinates",
         return_value={"normalized": False, "low_confidence": False, "topmost_confidence": 0.95},
     )
-    @patch("app.ocr_pipeline.process_image", return_value=[])
+    @patch("app.ocr_pipeline.process_image")
     @patch("app.structural_parser.process_input_json")
     def test_preprocess_force_retries_even_when_confident(
         self,
@@ -126,6 +126,13 @@ class TestSyncProcess:
         processor: ReceiptProcessor,
         image_path: Path,
     ):
+        # 有効画像で OCR 0 行の場合、process_image は raw JSON を書く（Issue #60 ガード対策）
+        def write_raw_and_return_empty(image_path, output_json_path, **kwargs):
+            output_json_path.parent.mkdir(parents=True, exist_ok=True)
+            output_json_path.write_text("[]")
+            return []
+
+        mock_process_image.side_effect = write_raw_and_return_empty
         processor.processed_dir = processor.file_repository.processed_dir
         processor.preprocess_mode = "clahe"
         processor.preprocess_force = True
@@ -159,6 +166,21 @@ class TestSyncProcess:
         failed_files = list(processor.file_repository.failed_dir.glob("*"))
         assert len(failed_files) >= 1
 
+    @patch("app.ocr_pipeline.process_image", return_value=[])
+    def test_returns_false_and_moves_to_failed_when_empty_result_and_no_raw(
+        self, mock_process_image, processor: ReceiptProcessor, image_path: Path
+    ):
+        """Issue #60: OCR が空 [] を返し raw JSON 未生成（読込不能）なら失敗として failed/ へ移動"""
+        processor.output_dir.mkdir(parents=True, exist_ok=True)
+
+        result = processor._sync_process(image_path)
+
+        assert result is False
+        # raw が生成されていない（process_image は [] を返すだけで書き込まない）→ 移動される
+        assert (processor.file_repository.failed_dir / image_path.name).exists()
+        assert not image_path.exists()  # input から取り除かれた
+        mock_process_image.assert_called_once()
+
 
 class TestDateBasisForceIntegration:
     """Issue #50: apply_date_anchor_normalization が None のとき apply_date_basis_force が呼ばれる."""
@@ -170,7 +192,7 @@ class TestDateBasisForceIntegration:
         return_value={"normalized": True, "low_confidence": False, "offset_x": 0, "offset_y": 0},
     )
     @patch("app.structural_parser.process_input_json", return_value={"clinic": "A", "date": "2026-01-15"})
-    @patch("app.ocr_pipeline.process_image", return_value=[])
+    @patch("app.ocr_pipeline.process_image")
     def test_force_called_when_anchor_none(
         self,
         mock_process_image,
@@ -181,6 +203,13 @@ class TestDateBasisForceIntegration:
         tmp_path: Path,
         image_path: Path,
     ):
+        # 有効画像で OCR 0 行の場合、process_image は raw JSON を書く（Issue #60 ガード対策）
+        def write_raw_and_return_empty(image_path, output_json_path, **kwargs):
+            output_json_path.parent.mkdir(parents=True, exist_ok=True)
+            output_json_path.write_text("[]")
+            return []
+
+        mock_process_image.side_effect = write_raw_and_return_empty
         file_repo = FileRepository(
             output_dir=tmp_path / "output",
             processed_dir=tmp_path / "processed",
@@ -209,7 +238,7 @@ class TestDateBasisForceIntegration:
         return_value={"normalized": True, "low_confidence": False, "offset_x": 0, "offset_y": 0},
     )
     @patch("app.structural_parser.process_input_json", return_value={"clinic": "A", "date": "2026-01-15"})
-    @patch("app.ocr_pipeline.process_image", return_value=[])
+    @patch("app.ocr_pipeline.process_image")
     def test_force_not_called_when_anchor_resolved(
         self,
         mock_process_image,
@@ -220,6 +249,13 @@ class TestDateBasisForceIntegration:
         tmp_path: Path,
         image_path: Path,
     ):
+        # 有効画像で OCR 0 行の場合、process_image は raw JSON を書く（Issue #60 ガード対策）
+        def write_raw_and_return_empty(image_path, output_json_path, **kwargs):
+            output_json_path.parent.mkdir(parents=True, exist_ok=True)
+            output_json_path.write_text("[]")
+            return []
+
+        mock_process_image.side_effect = write_raw_and_return_empty
         file_repo = FileRepository(
             output_dir=tmp_path / "output",
             processed_dir=tmp_path / "processed",
@@ -252,7 +288,7 @@ class TestForceNotCalledForOtherAnchorReasons:
         return_value={"normalized": True, "low_confidence": False, "offset_x": 0, "offset_y": 0},
     )
     @patch("app.structural_parser.process_input_json", return_value={"clinic": "A", "date": "2026-01-15"})
-    @patch("app.ocr_pipeline.process_image", return_value=[])
+    @patch("app.ocr_pipeline.process_image")
     def test_force_not_called_when_no_template(
         self,
         mock_process_image,
@@ -263,6 +299,13 @@ class TestForceNotCalledForOtherAnchorReasons:
         tmp_path: Path,
         image_path: Path,
     ):
+        # 有効画像で OCR 0 行の場合、process_image は raw JSON を書く（Issue #60 ガード対策）
+        def write_raw_and_return_empty(image_path, output_json_path, **kwargs):
+            output_json_path.parent.mkdir(parents=True, exist_ok=True)
+            output_json_path.write_text("[]")
+            return []
+
+        mock_process_image.side_effect = write_raw_and_return_empty
         file_repo = FileRepository(
             output_dir=tmp_path / "output",
             processed_dir=tmp_path / "processed",
