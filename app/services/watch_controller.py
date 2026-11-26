@@ -395,8 +395,10 @@ class WatchController:
         """存在しないパスへ空 DB を新規作成し migration を適用して参照対象にする。
 
         初回起動（参照する DB が未だ無い）で新規作成するための経路（案A 補足）。
-        _run_migrations は get_db_connection が parent.mkdir(parents=True) するため、
-        新規パスでも DB を自動作成する。既存パスを渡しても migration は冪等なので安全。
+        既存ファイル／ディレクトリを指定した場合は ValueError で拒否し、既存 DB を
+        上書き・変更しない（PR #63 レビュー [P2]#1）。作成時の競合も防ぐため、
+        空ファイルの作成は copy_image と同じ O_EXCL で原子的に行う。
+        migration 失敗時は作成したばかりのファイルを削除して副作用を残さない。
 
         [PR59-中3] 処理中確認と DB 置換を _scan_lock 内で一連化する。
 
@@ -407,7 +409,8 @@ class WatchController:
             Path: 作成された DB ファイルのパス。
 
         Raises:
-            ValueError: 相対パス・スキーマ関連の失敗の場合。
+            ValueError: 相対パス・既存ファイル／ディレクトリを指定した場合・
+                スキーマ関連の失敗の場合。
             WatchBusyError: スキャン処理中の場合。
         """
         p = Path(path).expanduser()
@@ -418,7 +421,22 @@ class WatchController:
         try:
             if self._is_processing:
                 raise WatchBusyError(BUSY_MESSAGE)
-            self._run_migrations(p)
+            if p.exists():
+                raise ValueError(f"ファイルが既に存在します: {p}")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            # [PR63-P2-1] 存在確認と作成の間にファイルが割り込んでも上書きしない
+            # （copy_image と同じ O_EXCL による原子的な作成）
+            try:
+                fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                raise ValueError(f"ファイルが既に存在します: {p}") from None
+            os.close(fd)
+            try:
+                self._run_migrations(p)
+            except Exception:
+                # migration 失敗時は作成したばかりの空ファイルを残さない
+                p.unlink(missing_ok=True)
+                raise
             self._db_path = p
             LOG.info("db_path -> %s (created)", p)
             return p

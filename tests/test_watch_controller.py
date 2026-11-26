@@ -451,6 +451,88 @@ def test_create_db_path_relative_path_raises(tmp_path):
         ctl.create_db_path("new.sqlite3")
 
 
+def test_create_db_path_rejects_existing_db(tmp_path):
+    """既存 DB を指定した新規作成は拒否され、ファイル内容も現在の DB 設定も変わらない"""
+    db = tmp_path / "existing.sqlite3"
+    run_migrations(db, SCHEMA_PATH)
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE probe (v TEXT)")
+    conn.execute("INSERT INTO probe VALUES ('before')")
+    conn.commit()
+    conn.close()
+    before = db.read_bytes()
+    # with_db=True で fixture DB（tmp_path/db.sqlite3）を設定済みの状態で拒否を確認
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0)
+    with pytest.raises(ValueError, match="既に存在"):
+        ctl.create_db_path(db)
+    assert db.read_bytes() == before
+    # 現在の DB 設定は fixture のまま（既存 DB が使用対象に変わらない）
+    assert ctl.db_path == str(tmp_path / "db.sqlite3")
+
+
+def test_create_db_path_rejects_existing_non_db_file(tmp_path):
+    """SQLite でない既存ファイルも拒否され、内容は変わらない"""
+    target = tmp_path / "notes.txt"
+    target.write_text("important data")
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0, with_db=False)
+    with pytest.raises(ValueError, match="既に存在"):
+        ctl.create_db_path(target)
+    assert target.read_text() == "important data"
+    assert ctl.has_db is False
+
+
+def test_create_db_path_rejects_existing_directory(tmp_path):
+    """既存ディレクトリを指定した新規作成も拒否される"""
+    d = tmp_path / "adir"
+    d.mkdir()
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0, with_db=False)
+    with pytest.raises(ValueError, match="既に存在"):
+        ctl.create_db_path(d)
+    assert d.is_dir()
+    assert ctl.has_db is False
+
+
+def test_create_db_path_rejects_race_created_file(tmp_path, monkeypatch):
+    """存在確認後にファイルが現れた作成時の競合も拒否され、既存内容は変更されない"""
+    import app.services.watch_controller as wc
+
+    db = tmp_path / "race.sqlite3"
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0, with_db=False)
+    real_open = os.open
+
+    def fake_open(path, flags, *args, **kwargs):
+        if Path(path) == db and (flags & os.O_CREAT):
+            # 競合: 他プロセスが先に作成済みの状態を再現（real_open で直接作成）
+            fd = real_open(db, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                os.write(fd, b"preexisting")
+            finally:
+                os.close(fd)
+            raise FileExistsError()
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(wc.os, "open", fake_open)
+    with pytest.raises(ValueError, match="既に存在"):
+        ctl.create_db_path(db)
+    assert db.read_bytes() == b"preexisting"
+    assert ctl.has_db is False
+
+
+def test_create_db_path_removes_created_file_when_migration_fails(tmp_path, monkeypatch):
+    """migration 失敗時は作成したばかりの空ファイルを残さない"""
+    db = tmp_path / "data" / "new.sqlite3"
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0, with_db=False)
+
+    def fail_migrations(db_path):
+        raise RuntimeError("migration failed")
+
+    monkeypatch.setattr(ctl, "_run_migrations", fail_migrations)
+    with pytest.raises(RuntimeError, match="migration failed"):
+        ctl.create_db_path(db)
+    assert not db.exists()
+    assert ctl.has_db is False
+
+
 # --- [低-1] テストの隔離: リポジトリ直下の data/ を書き換えない ---
 
 

@@ -179,6 +179,11 @@ git commit -m "feat #62: parse_amount が先頭の ¥ / ￥ を通貨記号と�
 > **設計注**: 初回起動時は参照する DB ファイルが存在せず「選択」できない（ユーザー指摘 2026-11-26）。
 > `select_db_path`（既存参照・存在チェック必須）と `create_db_path`（新規作成・存在チェックなし）の2系統にする。
 > `_run_migrations` は `get_db_connection` が `parent.mkdir(parents=True)` するため、新規パスでも DB を自動作成する。
+>
+> **追記（2026-11-26: PR #63 レビュー [P2]#1 対応）**: `create_db_path` の「存在チェックなし」は
+> 見直し、既存ファイル／ディレクトリを ValueError で拒否し、`os.open(O_CREAT|O_EXCL)` で空ファイルを
+> 原子的に作成する方式に変更した（既存 DB の上書き・変更を防止）。詳細は
+> `specs/db-select-path-spec.md` の「レビュー対応」節。
 
 ### Step 1: 失敗テストを書く（コントローラ）
 

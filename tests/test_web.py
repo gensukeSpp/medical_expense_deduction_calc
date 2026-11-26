@@ -1271,3 +1271,34 @@ def test_config_creates_new_db_path(tmp_path):
         assert st["has_db"] is True
         assert st["db_path"] == str(new_db)
     assert new_db.exists()
+
+
+def test_config_db_create_path_rejects_existing_db(tmp_path):
+    """/config の db_create_path で既存ファイルを指定すると 400 で拒否される"""
+    from app.web.server import create_app
+
+    existing = tmp_path / "existing.sqlite3"
+    run_migrations(existing, SCHEMA_PATH)
+    conn = sqlite3.connect(str(existing))
+    conn.execute("CREATE TABLE probe (v TEXT)")
+    conn.execute("INSERT INTO probe VALUES ('before')")
+    conn.commit()
+    conn.close()
+    before = existing.read_bytes()
+    out_dir = tmp_path / "out"
+    data_dir = tmp_path / "data"
+    app = create_app(output_dir=str(out_dir), data_dir=str(data_dir))
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/config",
+            data={"db_create_path": str(existing)},
+            follow_redirects=False,
+        )
+        assert r.status_code == 400
+        assert "既に存在" in r.json()["detail"]
+        st = client.get("/api/status").json()
+        assert st["has_db"] is False
+    # 既存ファイルの内容は変わらない
+    assert existing.read_bytes() == before
