@@ -72,3 +72,12 @@ def test_parse_date_empty():
     """テスト: 空文字列は None を返す"""
     assert parse_date("") is None
     assert parse_date(None) is None
+
+
+def test_parse_amount_yen_prefix():
+    """金額の先頭にある ¥ / ￥ を許容し、既存の日本語表記は維持する"""
+    assert parse_amount("¥3800") == 3800
+    assert parse_amount("￥3,800") == 3800
+    assert parse_amount("¥3,800円") == 3800
+    assert parse_amount("¥1万") == 10000
+    assert parse_amount("¥-500") is None  # 負値は記号除去より前に拒否

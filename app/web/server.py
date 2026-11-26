@@ -295,18 +295,24 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(e))
         except WatchBusyError as e:
             raise HTTPException(status_code=409, detail=str(e))
-        db_file = form.get("db_file")
-        if db_file is not None and getattr(db_file, "filename", ""):
-            # [中-2] 処理中の DB 差し替えは拒否（書き込み先 DB が途中で変わるため）
-            # [PR59-中3] 処理中確認＋DB 置換は save_db_upload 内で scan lock を使って一連化
+        db_path = form.get("db_path")
+        if db_path and str(db_path).strip():
+            # [PR59-中3] 処理中＋DB 置換は select_db_path 内で scan lock を使って一連化
             try:
-                controller.save_db_upload(await db_file.read(), db_file.filename)
+                controller.select_db_path(str(db_path).strip())
             except WatchBusyError as e:
                 raise HTTPException(status_code=409, detail=str(e))
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
-            except Exception:
-                raise HTTPException(status_code=400, detail="データベースファイルを開けませんでした")
+        db_create_path = form.get("db_create_path")
+        if db_create_path and str(db_create_path).strip():
+            # 初回起動（既存 DB なし）用: 空 DB を新規作成して参照対象にする
+            try:
+                controller.create_db_path(str(db_create_path).strip())
+            except WatchBusyError as e:
+                raise HTTPException(status_code=409, detail=str(e))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
         return RedirectResponse(url="/", status_code=303)
 
     @app.post("/watch/start")

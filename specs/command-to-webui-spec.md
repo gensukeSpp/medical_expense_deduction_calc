@@ -1,7 +1,7 @@
 ---
 title: コマンド主体から Web UI へ (Command-to-WebUI)
 created: 2026-11-16
-updated: 2026-11-20
+updated: 2026-11-26
 issue: 56
 ---
 
@@ -12,7 +12,7 @@ CLI コマンド主体の操作を Web UI（`--serve` のみ）で完結させ�
 
 ## フロー
 1. `uv run python main.py --serve [--db-path ...]` で起動（OCR は遅延初期化）
-2. パネルで 指定フォルダ（入力→適用）/ 前処理（選択で即適用）/ DB（ファイル選択で即アップロード）を設定
+2. パネルで 指定フォルダ（入力→適用）/ 前処理（選択で即適用）/ DB（サーバ側パス入力→適用＝既存 DB 参照 / 新規作成＝空 DB 作成）を設定（Issue #62 でアップロード方式から変更。詳細は specs/db-select-path-spec.md）
 3. watch ON でポーリング監視開始（DB 未選択なら 400）
 4. 画像を読み込む → input_dir へ**コピーのみ**＋ watch 未 ON なら自動開始
 5. structured data 生成（structured_count 増加）で一覧が自動リロードされリンク表示
@@ -20,7 +20,7 @@ CLI コマンド主体の操作を Web UI（`--serve` のみ）で完結させ�
 ## エンドポイント
 | ルート | メソッド | 動作 | エラー |
 |--------|---------|------|--------|
-| `/config` | POST | input_dir / preprocess_mode / db_file 設定 | 400 (mode, DB 不正, パス不正), 409 (スキャン処理中の設定変更・db_file) |
+| `/config` | POST | input_dir / preprocess_mode / db_path（既存参照）/ db_create_path（新規作成）設定 | 400 (mode, DB 不正, パス不正), 409 (スキャン処理中の設定変更・DB 切替) |
 | `/watch/start` | POST | 監視開始 | 400 (DB 未選択) |
 | `/watch/stop` | POST | 監視停止 | - |
 | `/images` | POST | 画像を input_dir へコピー（＋ watch 自動開始） | 400 (DB 未選択・非画像), 409 (処理中・処理待ち・同名) |
@@ -41,7 +41,7 @@ watch_on / is_processing / pending / input_dir / db_path / preprocess_mode / pol
 | 項目 | 決定 | 理由 |
 |------|------|------|
 | アップロード画像 | コピーのみ＋ watch 自動開始（方式はポーリング） | ユーザー回答（案C）＋「読み込む＝処理開始」の期待 |
-| DB 保存先 | アプリ内 data/ に元ファイル名（案A） | ユーザー回答・gitignore 済み |
+| DB 選択 | サーバ側パス入力＋適用で既存 DB を直接参照。アップロード廃止、新規作成経路追加（案A・Issue #62） | data/ への DB コピー増殖と初回起動で選択不可の解消。詳細は specs/db-select-path-spec.md |
 | 状態永続化 | プロセス内メモリのみ（案A） | YAGNI・スキーマ変更なし |
 | watch | ポーリング方式（scan_and_process 再利用） | 停止制御が容易 |
 | 多重処理防止 | _scan_lock + 既存 mtime 冪等ガード | 二重スキャン・二重登録を防止 |
@@ -59,7 +59,7 @@ watch_on / is_processing / pending / input_dir / db_path / preprocess_mode / pol
 1. Web ページから watch 動作 → POST /watch/start + /api/status で確認
 2. DB なしで watch/画像指定 → 400
 3. 処理中は file input disabled、完了で解除（watch 継続）→ JS ポーリング制御
-4. 処理中の DB 差し替えは 409（[中-2]）→ POST /config の db_file 分岐のガード
+4. 処理中の DB 差し替えは 409（[中-2]）→ POST /config の db_path / db_create_path 分岐のガード
 5. 画像コピー後〜 structured 生成完了まで画像指定は無効（[中-3]）→ pending 状態 + /images の 409
 6. 同名画像は上書きせず 409（[中-5]）→ copy_image の FileExistsError
 7. 非 loopback host での起動は拒否（[中-4]）→ app.args.is_loopback_host() + main.py の serve 分岐

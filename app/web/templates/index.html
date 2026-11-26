@@ -43,7 +43,7 @@
             const imgBtn = document.getElementById('image-submit');
             if (imgInput) { imgInput.disabled = s.is_processing || s.pending; }
             if (imgBtn) { imgBtn.disabled = s.is_processing || s.pending; }
-            const dbInput = document.getElementById('db-file-input');
+            const dbInput = document.getElementById('db-path-input');
             if (dbInput) { dbInput.disabled = s.is_processing; }
             if (s.structured_count > prevStructuredCount) {
                 // 新しい structured data が生成されたときだけ一覧を更新（完了時のリンク表示）
@@ -115,21 +115,28 @@
                 });
             }
 
-            // データベース: ファイル選択で確定（即アップロード）
-            const dbInput = document.getElementById('db-file-input');
-            if (dbInput) {
-                dbInput.addEventListener('change', async () => {
-                    const f = dbInput.files[0];
-                    if (!f) { return; }
-                    try {
-                        const fd = new FormData();
-                        fd.append('db_file', f);
-                        await postForm('/config', fd);
-                        showError('');
-                        dbInput.value = '';  // 同じファイルを再選択できるように解除
-                        applyStatus(await fetchStatus());
-                    } catch (e) { showError(e.message); }
-                });
+            // データベース: パス入力 + 適用/新規作成ボタンで確定（既存参照 or 空DB作成）
+            const dbApply = document.getElementById('db-path-apply');
+            const dbCreate = document.getElementById('db-path-create');
+            const postDbPath = async (field) => {
+                const dbPath = document.getElementById('db-path-input').value;
+                if (!dbPath) {
+                    showError('データベースのパスを入力してください');
+                    return;
+                }
+                try {
+                    const fd = new FormData();
+                    fd.append(field, dbPath);
+                    await postForm('/config', fd);
+                    showError('');
+                    applyStatus(await fetchStatus());
+                } catch (e) { showError(e.message); }
+            };
+            if (dbApply) {
+                dbApply.addEventListener('click', () => postDbPath('db_path'));
+            }
+            if (dbCreate) {
+                dbCreate.addEventListener('click', () => postDbPath('db_create_path'));
             }
 
             // watch ON/OFF ボタン
@@ -203,11 +210,13 @@
 
         <div style="margin-bottom:8px;">
             <label>データベース:
-                <input id="db-file-input" type="file" name="db_file" accept=".db,.sqlite,.sqlite3"
+                <input id="db-path-input" type="text" value="{{ ctl.db_path or '' }}" size="50"
                        {% if ctl.is_processing %}disabled{% endif %}>
             </label>
+            <button id="db-path-apply" type="button" {% if ctl.is_processing %}disabled{% endif %}>適用</button>
+            <button id="db-path-create" type="button" {% if ctl.is_processing %}disabled{% endif %}>新規作成</button>
             <span id="db-hint">{% if ctl.has_db %}現在: {{ ctl.db_path }}{% else %}<span style="color:#c00;">未選択</span>{% endif %}</span>
-            <span style="color:#888;">（ファイル選択で確定）</span>
+            <span style="color:#888;">（サーバ側のパスを直接入力。「適用」は既存ファイル参照、「新規作成」は空 DB 作成＝初回起動向け）</span>
         </div>
 
         <div style="margin-bottom:8px;">

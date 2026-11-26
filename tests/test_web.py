@@ -810,83 +810,87 @@ def test_config_rejects_unknown_mode(web_client):
     assert resp.status_code == 400
 
 
-def test_config_db_upload_saves_and_migrates(web_client, web_ctl, tmp_path):
-    """DB ファイルのアップロードで data/ に保存され has_db になる（Q2 案A）"""
-    src = tmp_path / "upload_src.sqlite3"
+def test_config_db_path_select_migrates_and_sets_db_path(web_client, web_ctl, tmp_path):
+    """/config の db_path で既存 DB を参照対象にし has_db になる（案A）"""
+    src = tmp_path / "select_src.sqlite3"
     run_migrations(src, SCHEMA_PATH)
     resp = web_client.post(
         "/config",
-        files={"db_file": ("my_upload.db", src.read_bytes(), "application/octet-stream")},
+        data={"db_path": str(src)},
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    assert (web_ctl.data_dir / "my_upload.db").exists()
+    assert web_ctl.db_path == str(src)
     assert web_client.get("/api/status").json()["has_db"] is True
 
 
-def test_config_db_upload_invalid_returns_400(web_client, web_ctl):
-    """不正な DB ファイルは 400（詳細メッセージ付き）で保存されない"""
+def test_config_db_path_invalid_returns_400(web_client, web_ctl, tmp_path):
+    """SQLite でないファイルのパスは 400"""
+    bad = tmp_path / "bad.db"
+    bad.write_bytes(b"not a sqlite db")
     resp = web_client.post(
         "/config",
-        files={"db_file": ("bad.db", b"not a sqlite db", "application/octet-stream")},
+        data={"db_path": str(bad)},
         follow_redirects=False,
     )
     assert resp.status_code == 400
-    assert not (web_ctl.data_dir / "bad.db").exists()
+    # 不正パスでは選択されない（既存の fixture DB のまま）
+    assert web_ctl.db_path != str(bad)
 
 
-def test_config_db_upload_keeps_existing_db(web_client, web_ctl, tmp_path):
-    """[高-1] 既存同名 DB へのアップロードで既存 DB は上書き・削除されない"""
-    existing = web_ctl.data_dir / "db.sqlite3"
-    run_migrations(existing, SCHEMA_PATH)
-    conn = sqlite3.connect(str(existing))
-    conn.execute("CREATE TABLE IF NOT EXISTS marker (value TEXT)")
-    conn.execute("INSERT INTO marker (value) VALUES ('original')")
-    conn.commit()
-    conn.close()
-
-    src = tmp_path / "src.sqlite3"
-    run_migrations(src, SCHEMA_PATH)
+def test_config_db_path_directory_returns_400(web_client, web_ctl, tmp_path):
+    """[PR63-P2-2] ディレクトリを db_path に指定しても 500 にならず 400 で拒否される"""
+    d = tmp_path / "dir.db"
+    d.mkdir()
     resp = web_client.post(
         "/config",
-        files={"db_file": ("db.sqlite3", src.read_bytes(), "application/octet-stream")},
+        data={"db_path": str(d)},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 400
+    # ディレクトリは選択されない（既存の fixture DB のまま）
+    assert web_ctl.db_path != str(d)
+
+
+def test_config_db_path_keeps_existing_file_untouched(web_client, web_ctl, tmp_path):
+    """[高-1] db_path 参照では既存 DB はコピー・連番されずそのまま使われる"""
+    existing = web_ctl.data_dir / "db.sqlite3"
+    run_migrations(existing, SCHEMA_PATH)
+    resp = web_client.post(
+        "/config",
+        data={"db_path": str(existing)},
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    # 既存 DB は保持される
-    conn = sqlite3.connect(str(existing))
-    try:
-        assert [r[0] for r in conn.execute("SELECT value FROM marker")] == ["original"]
-    finally:
-        conn.close()
-    # 新しい内容は別名で保存される
-    assert (web_ctl.data_dir / "db_1.sqlite3").exists()
+    # 参照されるだけで、data/ 直下に複製・連番は作られない
+    assert web_ctl.db_path == str(existing)
+    assert list(web_ctl.data_dir.glob("*.sqlite3")) == [existing]
 
 
-def test_config_db_upload_409_while_processing(web_client, web_ctl, tmp_path):
-    """[中-2] 処理中の DB 差し替えアップロードは 409"""
+def test_config_db_path_409_while_processing(web_client, web_ctl, tmp_path):
+    """[中-2] 処理中の DB 差し替えは 409"""
     src = tmp_path / "swap.sqlite3"
     run_migrations(src, SCHEMA_PATH)
     web_ctl._is_processing = True
     try:
         resp = web_client.post(
             "/config",
-            files={"db_file": ("swap.db", src.read_bytes(), "application/octet-stream")},
+            data={"db_path": str(src)},
             follow_redirects=False,
         )
     finally:
         web_ctl._is_processing = False
     assert resp.status_code == 409
-    assert not (web_ctl.data_dir / "swap.db").exists()
+    assert web_ctl.db_path != str(src)
 
 
-def test_db_file_input_disabled_while_processing(web_client, web_ctl):
-    """[中-2] 処理中は db-file-input が disabled になる"""
+def test_db_path_input_disabled_while_processing(web_client, web_ctl):
+    """[中-2] 処理中は db-path-input が disabled になる"""
     web_ctl._is_processing = True
     try:
         page = web_client.get("/")
-        m = re.search(r'<input id="db-file-input"[^>]*>', page.text)
-        assert m is not None, "db-file-input タグが見つからない"
+        m = re.search(r'<input id="db-path-input"[^>]*>', page.text)
+        assert m is not None, "db-path-input タグが見つからない"
         assert "disabled" in m.group(0)
     finally:
         web_ctl._is_processing = False
@@ -1140,15 +1144,15 @@ def test_watch_picks_up_uploaded_image(web_client, web_ctl):
     web_client.post("/watch/stop", follow_redirects=False)
 
 
-def test_config_db_only_upload(web_client, tmp_path):
-    """DB ファイルのみの /config 送信（選択即確定の JS が送る形）で has_db になる"""
+def test_config_db_path_only_submit(web_client, tmp_path):
+    """db_path のみの /config 送信（選択即確定の JS が送る形）で has_db になる"""
     from app.db_migrations import run_migrations
 
     src = tmp_path / "only_db.sqlite3"
     run_migrations(src, SCHEMA_PATH)
     resp = web_client.post(
         "/config",
-        files={"db_file": ("auto.db", src.read_bytes(), "application/octet-stream")},
+        data={"db_path": str(src)},
         follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -1225,7 +1229,9 @@ def test_index_has_auto_apply_elements(web_client):
     """選択即確定 UI の要素 id と fetch 配線が含まれる（Issue #56 UX 修正）"""
     page = web_client.get("/").text
     for needle in (
-        'id="db-file-input"',
+        'id="db-path-input"',
+        'id="db-path-apply"',
+        'id="db-path-create"',
         'id="db-hint"',
         'id="watch-btn"',
         'id="image-result"',
@@ -1233,6 +1239,80 @@ def test_index_has_auto_apply_elements(web_client):
         'id="ctl-error"',
         "postForm('/config'",
         "postForm('/images'",
-        'accept=".db,.sqlite,.sqlite3"',
+        "'db_create_path'",
     ):
         assert needle in page, f"{needle} が index.html に含まれない"
+
+
+def test_config_selects_existing_db_path_by_reference(tmp_path):
+    """/config でパスを指定した DB を参照対象にし、data/ へコピーしない"""
+    from app.web.server import create_app
+
+    selected = tmp_path / "selected.sqlite3"
+    run_migrations(selected, SCHEMA_PATH)
+    out_dir = tmp_path / "out"
+    data_dir = tmp_path / "data"
+    app = create_app(output_dir=str(out_dir), data_dir=str(data_dir))
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        r = client.post("/config", data={"db_path": str(selected)}, follow_redirects=False)
+        assert r.status_code == 303
+        assert r.headers["location"] == "/"
+        st = client.get("/api/status").json()
+        assert st["has_db"] is True
+        assert st["db_path"] == str(selected)
+    # 連番コピー / data/ 配下への複製は作られない
+    assert not (data_dir / "selected.sqlite3").exists()
+    assert list(data_dir.glob("*")) == []
+
+
+def test_config_creates_new_db_path(tmp_path):
+    """/config で存在しないパスに空 DB を新規作成する（初回起動対応）"""
+    from app.web.server import create_app
+
+    new_db = tmp_path / "data" / "fresh.sqlite3"
+    out_dir = tmp_path / "out"
+    data_dir = tmp_path / "data"
+    app = create_app(output_dir=str(out_dir), data_dir=str(data_dir))
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        r = client.post("/config", data={"db_create_path": str(new_db)}, follow_redirects=False)
+        assert r.status_code == 303
+        assert r.headers["location"] == "/"
+        st = client.get("/api/status").json()
+        assert st["has_db"] is True
+        assert st["db_path"] == str(new_db)
+    assert new_db.exists()
+
+
+def test_config_db_create_path_rejects_existing_db(tmp_path):
+    """/config の db_create_path で既存ファイルを指定すると 400 で拒否される"""
+    from app.web.server import create_app
+
+    existing = tmp_path / "existing.sqlite3"
+    run_migrations(existing, SCHEMA_PATH)
+    conn = sqlite3.connect(str(existing))
+    conn.execute("CREATE TABLE probe (v TEXT)")
+    conn.execute("INSERT INTO probe VALUES ('before')")
+    conn.commit()
+    conn.close()
+    before = existing.read_bytes()
+    out_dir = tmp_path / "out"
+    data_dir = tmp_path / "data"
+    app = create_app(output_dir=str(out_dir), data_dir=str(data_dir))
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/config",
+            data={"db_create_path": str(existing)},
+            follow_redirects=False,
+        )
+        assert r.status_code == 400
+        assert "既に存在" in r.json()["detail"]
+        st = client.get("/api/status").json()
+        assert st["has_db"] is False
+    # 既存ファイルの内容は変わらない
+    assert existing.read_bytes() == before

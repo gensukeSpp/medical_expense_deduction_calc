@@ -30,6 +30,13 @@ def extract_name_from_lines(lines: List[str]) -> Optional[str]:
             # take text before 様
             name = line.split("様")[0].strip()
             return name
+        if line.startswith("氏名") or "氏名:" in line or "氏名：" in line:
+            m2 = re.search(r"氏名[:：]?\s*(.+)", line)
+            if m2:
+                candidate = m2.group(1).strip()
+                candidate = candidate.replace("様", "").strip()
+                if 1 < len(candidate) <= 40:
+                    return candidate
         if line.startswith("患者") or "患者:" in line or "患者：" in line:
             m2 = re.search(r"患者[:：]?\s*(.+)", line)
             if m2:
