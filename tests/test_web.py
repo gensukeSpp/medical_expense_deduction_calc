@@ -838,6 +838,20 @@ def test_config_db_path_invalid_returns_400(web_client, web_ctl, tmp_path):
     assert web_ctl.db_path != str(bad)
 
 
+def test_config_db_path_directory_returns_400(web_client, web_ctl, tmp_path):
+    """[PR63-P2-2] ディレクトリを db_path に指定しても 500 にならず 400 で拒否される"""
+    d = tmp_path / "dir.db"
+    d.mkdir()
+    resp = web_client.post(
+        "/config",
+        data={"db_path": str(d)},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 400
+    # ディレクトリは選択されない（既存の fixture DB のまま）
+    assert web_ctl.db_path != str(d)
+
+
 def test_config_db_path_keeps_existing_file_untouched(web_client, web_ctl, tmp_path):
     """[高-1] db_path 参照では既存 DB はコピー・連番されずそのまま使われる"""
     existing = web_ctl.data_dir / "db.sqlite3"

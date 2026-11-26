@@ -343,7 +343,8 @@ class WatchController:
             Path: 設定された DB ファイルのパス。
 
         Raises:
-            ValueError: 相対パス・存在しない・SQLite として不正な場合。
+            ValueError: 相対パス・存在しない・読み取り不能（ディレクトリ等）・
+                SQLite として不正な場合。
             WatchBusyError: スキャン処理中の場合。
         """
         p = Path(path).expanduser()
@@ -371,10 +372,16 @@ class WatchController:
             path: 検証対象の DB ファイルパス。
 
         Raises:
-            ValueError: SQLite ヘッダが無い、または必須テーブルが存在しない場合。
+            ValueError: SQLite ヘッダが無い、必須テーブルが存在しない、
+                またはファイルを開けない（ディレクトリ・権限不足等）場合。
         """
-        with open(path, "rb") as f:
-            header = f.read(len(SQLITE_MAGIC))
+        try:
+            with open(path, "rb") as f:
+                header = f.read(len(SQLITE_MAGIC))
+        except OSError as e:
+            # [PR63-P2-2] ディレクトリ指定・権限不足などの I/O エラーは
+            # 利用者向けの ValueError に変換する（/config で 400 になる）
+            raise ValueError(f"データベースファイルを開けません: {e}") from e
         if header != SQLITE_MAGIC:
             raise ValueError("SQLite データベースファイルではありません")
         try:

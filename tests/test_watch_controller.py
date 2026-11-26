@@ -413,6 +413,17 @@ def test_select_db_path_rejects_non_db_file(tmp_path):
         ctl.select_db_path(other)
 
 
+def test_select_db_path_rejects_directory(tmp_path):
+    """[PR63-P2-2] ディレクトリを DB パスに指定すると ValueError（HTTP 400 相当）"""
+    ctl = _make_ctl(tmp_path, scan_fn=lambda *a, **k: 0, with_db=False)
+    d = tmp_path / "dir.sqlite3"
+    d.mkdir()
+    with pytest.raises(ValueError, match="開けません"):
+        ctl.select_db_path(d)
+    # ディレクトリは選択されない
+    assert ctl.db_path != str(d)
+
+
 def test_select_db_path_rejected_while_scanning(tmp_path):
     """[PR59-中3] スキャン中の DB 差し替えは拒否され db_path は変わらない"""
     entered = threading.Event()
