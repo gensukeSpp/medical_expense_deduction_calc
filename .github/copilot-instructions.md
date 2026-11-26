@@ -1,4 +1,4 @@
-# Copilot instructions for medical-exp-deducation-calc
+# Copilot instructions for medical_exp_deduction_calc
 
 This repo implements an OCR-driven workflow for medical receipts used in tax deduction workflows. The core logic is not a generic Python app: it is a receipt-processing pipeline that combines PaddleOCR, structured extraction, normalization, SQLite persistence, and a human review loop.
 
@@ -19,6 +19,9 @@ uv run main.py --watch --use-watchdog --input-dir ~/Downloads/receipts --output-
 
 # Polling mode for the same workflow
 uv run main.py --watch --input-dir ~/Downloads/receipts --output-dir output_json
+
+# Process one image
+uv run python main.py --input-dir ~/Downloads/receipts --image-name IMG_001.jpg
 
 # Process one OCR JSON file into structured output
 uv run main.py --input-json path/to/ocr_data.json --output-dir output_json
@@ -63,6 +66,7 @@ The system is organized as a pipeline rather than a monolith:
 - `app/services/` contains the orchestration layer for receipt processing, template matching, and DB-backed business logic.
 - `app/db.py` and `docs/schema.sql` are the persistence boundary for receipts, clinic templates, coordinate corrections, and user feedback.
 - `app/web/server.py` exposes the review UI where users verify/correct extraction results.
+- `app/calc.py` contains pure monthly-list calculations; `app/services/receipt_list_service.py` loads the JSON-backed list and persists per-row compensation values.
 
 The practical flow is:
 
@@ -86,6 +90,8 @@ Two processing paths matter in practice:
    same extraction/normalization/persistence/output stages.
 
 Preserve that layering when changing code: OCR, normalization, persistence, and review UI each have distinct responsibilities.
+`main.py` and `app/args.py` are the CLI boundary; put processing orchestration in `app/services/` and SQLite
+CRUD in `app/db.py` rather than in routes or parser functions.
 Date-anchor normalization is an image/watcher-only follow-up; the existing-JSON path intentionally retains
 topmost-based coordinates for compatibility. Do not re-run `process_input_json()` after applying an anchor:
 that path inserts a receipt, so reprocessing can create a duplicate. Persist coordinate synchronization through
@@ -97,7 +103,17 @@ the existing database update path instead.
 - Keep CLI behavior centralized in `app/args.py`; when adding options, follow the existing `--watch`, `--input-json`, `--serve`, and `--db-path` patterns.
 - `docs/schema.sql` is the source of truth for SQLite structure; implement schema evolution through the idempotent migrations in `app/db_migrations.py`.
 - Keep SQLite foreign-key enforcement enabled. Migrations must be idempotent and must preserve the existing database file when tests or Web uploads use SQLite.
+- Keep output naming stable: `{stem}_{mtime}-raw_data.json`,
+  `{stem}_{mtime}-raw_data.preprocessed.json`, and
+  `{stem}_{mtime}-structured_data.json`. Raw JSON and structured JSON have different
+  roles and must not be reused as substitutes for one another.
 - Tests must not write to the repository's real `data/` directory. `tests/conftest.py` redirects `WatchController.DATA_DIR` and fails if `data/` changes; use temporary paths and the existing fixtures.
+- Use `tmp_path`/`tmp_path_factory` and the existing database fixtures for SQLite tests. The shared
+  autouse fixture is designed to catch accidental writes to the repository's real `data/` directory.
+- For JSON name/date/amount behavior, start with `tests/test_normalization.py`; for coordinate/date-anchor
+  behavior use `tests/test_coord_normalizer.py`, `tests/test_date_anchor.py`, and `tests/test_date_anchor_branches.py`.
+- For Web behavior use `tests/test_web.py`; for watcher/Web watch state use `tests/test_watch_controller.py`
+  and `tests/test_watcher_integration.py`.
 - Template matching is proximity-first and coordinate-aware. The repo uses hybrid matching: exact clinic name match, then text similarity, then layout-based matching (50px proximity / 60% field match).
 - Coordinate bases must stay consistent: templates are marked `topmost` or `date` with `coord_basis`. The admin flow only supports a guarded topmost-to-date transition when a date box is learned; use `TemplateAdminService` and the existing transactional DB operation rather than editing template coordinates or basis directly.
 - When a date-basis template is corrected from the Web UI, convert the corrected coordinates into date basis and keep `coord_basis='date'`. If the receipt or date anchor cannot identify a unique date basis, do not write corrected template coordinates or change the basis.
@@ -106,6 +122,9 @@ the existing database update path instead.
 - Do not rerun `process_input_json()` after date-anchor normalization. It inserts a receipt and can create duplicates; synchronize persisted OCR coordinates with `update_receipt_ocr_json_by_source()` instead.
 - Web serving is intentionally local and unauthenticated. Do not weaken the loopback-host guard or allow arbitrary host paths outside the home directory.
 - Atomic JSON writes and stable-file checks are part of the pipeline; preserve the existing output naming and file-size stability behavior when changing watcher or writer code.
+- Monthly-list compensation is per receipt, stored in the `compensation` key of structured JSON.
+  Calculate row contribution as `max(0, amount - compensation)` and sum those row contributions;
+  do not first sum amounts and subtract a monthly compensation total.
 - Keep formatting consistent with existing imports and Black style: stdlib -> third-party -> local; line length is 119.
 - Detailed changing rules live in `.hermes/rules/`:
   - `.hermes/rules/cli.md`: CLI and Web operational behavior
