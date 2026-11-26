@@ -12,7 +12,6 @@ import os
 import sqlite3
 import threading
 from pathlib import Path
-from uuid import uuid4
 
 from app import watcher
 from app.args import validate_input_dir
@@ -47,39 +46,6 @@ def _default_ocr_factory():
     from paddleocr import PaddleOCR
 
     return PaddleOCR(use_angle_cls=True, lang="japan", enable_mkldnn=False)
-
-
-def _atomic_install(src: Path, dest: Path) -> None:
-    """一時ファイルを配置先へ原子的に移動する（既存ファイルを上書きしない）。
-
-    ``os.link`` は dest が既に存在する場合に失敗するため、上書きが原理的に
-    起きない。ハードリンク非対応環境では ``O_EXCL`` で名前を予約してから置換する。
-
-    Args:
-        src: 移動元の一時ファイル。
-        dest: 移動先（存在しないこと）。
-
-    Raises:
-        FileExistsError: 配置先ファイルが既に存在する場合。
-    """
-    try:
-        os.link(src, dest)
-    except FileExistsError:
-        raise
-    except OSError:
-        # ハードリンク非対応環境: O_EXCL で名前を排他予約してから置換する
-        try:
-            fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            raise
-        os.close(fd)
-        try:
-            os.replace(src, dest)
-        except Exception:
-            dest.unlink(missing_ok=True)  # 予約した空ファイルを片付ける
-            raise
-        return
-    os.unlink(src)
 
 
 class WatchController:
@@ -359,66 +325,47 @@ class WatchController:
         return self._ocr
 
     # ------------------------------------------------------------------
-    # DB アップロード保存 / 画像コピー
+    # DB パス選択 / 新規作成 / 画像コピー
     # ------------------------------------------------------------------
 
-    def save_db_upload(self, content: bytes, filename: str) -> Path:
-        """アップロードされた DB を data/ 配下へ保存し migration を適用する。
+    def select_db_path(self, path: str | Path) -> Path:
+        """既存の DB パスを参照対象として固定する（案A: コピー・連番を作らない）。
 
-        既存 DB を失わないよう、次の順序で処理する。
+        存在チェック・SQLite ヘッダ/必須テーブル検証・migration を実行し、_db_path に
+        設定する。既存ファイルをそのまま使用するため data/ への保存は行わない。
 
-        1. 一時ファイル（``.upload-*.tmp``）へ書き込む
-        2. SQLite ヘッダと必須テーブルの存在を検証する
-        3. 一時ファイルへ migration を適用する
-        4. 検証済みの内容を原子的に rename して保存する
-
-        同名の既存ファイルは上書きせず連番（``name_1.db`` 等）で保存する。
-        失敗時は今回作成した一時ファイルのみ削除する（既存 DB は残す）。
-
-        [PR59-中3] 処理中確認と DB 置換を _scan_lock 内で一連化し、
-        スキャン開始との競合（処理中に DB が差し替わる競合）を防ぐ。
+        [PR59-中3] 処理中確認と DB 置換を _scan_lock 内で一連化する。
 
         Args:
-            content: アップロードされたファイル内容。
-            filename: 元ファイル名（basename のみ利用する）。
+            path: 参照する DB ファイルの絶対パス。
 
         Returns:
-            Path: 実際に保存された DB ファイルのパス。
+            Path: 設定された DB ファイルのパス。
 
         Raises:
-            ValueError: ファイル名が不正、または SQLite DB として不正な場合。
+            ValueError: 相対パス・存在しない・SQLite として不正な場合。
             WatchBusyError: スキャン処理中の場合。
         """
-        name = Path(filename).name  # basename のみ（パス注入防止）
-        if not name or name in {".", ".."}:
-            raise ValueError("ファイル名が不正です")
+        p = Path(path).expanduser()
+        if not p.is_absolute():
+            raise ValueError("絶対パスを指定してください")
+        if not p.exists():
+            raise ValueError(f"ファイルが存在しません: {p}")
         if not self._scan_lock.acquire(blocking=False):
             raise WatchBusyError(BUSY_MESSAGE)
         try:
             if self._is_processing:
                 raise WatchBusyError(BUSY_MESSAGE)
-            self.data_dir.mkdir(parents=True, exist_ok=True)
-            tmp_path = self.data_dir / f".upload-{uuid4().hex}.tmp"
-            try:
-                tmp_path.write_bytes(content)
-                self._validate_uploaded_db(tmp_path)
-                self._run_migrations(tmp_path)
-                dest = self._install_db(tmp_path, name)
-            except Exception:
-                LOG.exception("Failed to save uploaded DB %s", name)
-                tmp_path.unlink(missing_ok=True)  # 今回作った一時ファイルのみ削除
-                raise
-            # migration は一時ファイルへ適用済みなので、配置先のパスを設定する
-            self._db_path = dest
-            LOG.info("db_path -> %s", dest)
-            return dest
+            self._validate_db_file(p)
+            self._run_migrations(p)
+            self._db_path = p
+            LOG.info("db_path -> %s", p)
+            return p
         finally:
             self._scan_lock.release()
 
-    def _validate_uploaded_db(self, path: Path) -> None:
-        """アップロードされた DB ファイルの妥当性を検証する。
-
-        SQLite ヘッダと必須テーブルの存在を確認する。
+    def _validate_db_file(self, path: Path) -> None:
+        """DB ファイルの SQLite ヘッダと必須テーブルの存在を検証する。
 
         Args:
             path: 検証対象の DB ファイルパス。
@@ -444,35 +391,39 @@ class WatchController:
         if missing:
             raise ValueError(f"必須テーブルがありません: {', '.join(missing)}")
 
-    def _install_db(self, tmp_path: Path, name: str) -> Path:
-        """一時ファイルを data/ 配下へ配置する（既存ファイルを上書きしない）。
+    def create_db_path(self, path: str | Path) -> Path:
+        """存在しないパスへ空 DB を新規作成し migration を適用して参照対象にする。
 
-        同名のファイルが既にある場合は連番（``name_1.db`` 等）を付与して保存する。
+        初回起動（参照する DB が未だ無い）で新規作成するための経路（案A 補足）。
+        _run_migrations は get_db_connection が parent.mkdir(parents=True) するため、
+        新規パスでも DB を自動作成する。既存パスを渡しても migration は冪等なので安全。
+
+        [PR59-中3] 処理中確認と DB 置換を _scan_lock 内で一連化する。
 
         Args:
-            tmp_path: 配置する一時ファイル。
-            name: 保存したいファイル名（basename）。
+            path: 作成する DB ファイルの絶対パス。
 
         Returns:
-            Path: 実際に配置されたパス。
+            Path: 作成された DB ファイルのパス。
 
         Raises:
-            ValueError: 保存先が見つからない場合。
+            ValueError: 相対パス・スキーマ関連の失敗の場合。
+            WatchBusyError: スキャン処理中の場合。
         """
-        stem, suffix = Path(name).stem, Path(name).suffix
-        for index in range(1000):
-            dest = self.data_dir / (name if index == 0 else f"{stem}_{index}{suffix}")
-            if dest.exists():
-                continue
-            try:
-                _atomic_install(tmp_path, dest)
-            except FileExistsError:
-                # 配置直前に同名ファイルが作成された場合は次の連番へ
-                continue
-            if index:
-                LOG.info("Existing DB found, saved with a new name: %s", dest)
-            return dest
-        raise ValueError(f"保存先が見つかりません: {name}")
+        p = Path(path).expanduser()
+        if not p.is_absolute():
+            raise ValueError("絶対パスを指定してください")
+        if not self._scan_lock.acquire(blocking=False):
+            raise WatchBusyError(BUSY_MESSAGE)
+        try:
+            if self._is_processing:
+                raise WatchBusyError(BUSY_MESSAGE)
+            self._run_migrations(p)
+            self._db_path = p
+            LOG.info("db_path -> %s (created)", p)
+            return p
+        finally:
+            self._scan_lock.release()
 
     def copy_image(self, filename: str, content: bytes) -> Path:
         """アップロード画像を input_dir へコピーする（案C: コピーのみ・即時処理しない）。
