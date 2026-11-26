@@ -38,3 +38,25 @@ def test_mock_extractor_noisy():
     out = client.extract_fields(ocr)
     assert out["amount"] == 12000
     assert out["name"] in ("山田太郎", "山田 太郎", "山田太郎")
+
+
+def test_extract_name_uses_shimei_prefix():
+    """氏名: / 氏名： のプレフィックスから名前を抽出する"""
+    from app.llm_extractor import extract_name_from_lines
+
+    assert extract_name_from_lines(["氏名: 山田太郎", "金額: 500円"]) == "山田太郎"
+    assert extract_name_from_lines(["氏名：鈴木花子", "500円"]) == "鈴木花子"
+
+
+def test_extract_name_keeps_kanja_fallback():
+    """患者: プレフィックスは下位互換として残す（test_mock_extractor_noisy が依存）"""
+    from app.llm_extractor import extract_name_from_lines
+
+    assert extract_name_from_lines(["患者: 山田太郎", "500円"]) == "山田太郎"
+
+
+def test_extract_name_still_uses_sama_branch():
+    """様 サフィックス branch は変更しない（既存動作の維持）"""
+    from app.llm_extractor import extract_name_from_lines
+
+    assert extract_name_from_lines(["山田太郎様", "500円"]) == "山田太郎"
