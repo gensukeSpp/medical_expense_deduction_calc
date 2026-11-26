@@ -57,6 +57,8 @@ def parse_amount(text: str) -> Optional[int]:
         return "".join(res)
 
     t = normalize_fw(str(text))
+    # 先頭の通貨記号（¥ U+00A5 / ￥ U+FFE5）を除去してから数値展開する
+    t = t.lstrip("¥￥")
 
     # direct numeric with yen
     m = re.search(r"([0-9,]+)\s*円", t)
